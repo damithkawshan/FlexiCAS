@@ -4,6 +4,7 @@
 #include "util/query.hpp"
 #include "flexicas-pfc.h"
 #include "cache/mesi.hpp"
+#include "util/set_utilization_monitor.hpp"
 
 #include <list>
 #include <deque>
@@ -14,6 +15,7 @@
 #include <atomic>
 #include <iostream>
 #include <iomanip>
+#include <fstream>
 
 // Embedded microprocessor configuration (similar to SiFive-style inclusive cache)
 // Small caches optimized for embedded systems with MESI inclusive hierarchy
@@ -23,8 +25,8 @@
 #define L1WN 2    // 2^2 = 4-way set associative
 
 // 64K, 4W, inclusive (MESI protocol, similar to MOESI for embedded systems)
-#define L2IW 8    // 2^8 = 256 sets, 256*64B*4 = 64KB
-#define L2WN 2    // 2^2 = 4-way set associative
+#define L2IW 9    // Modified by gen_test.sh
+#define L2WN 1    // Modified by gen_test.sh
 
 
 // multithread support
@@ -51,6 +53,11 @@ namespace {
   static SimpleAccMonitor *l1i_perf_monitor;
   static SimpleAccMonitor *l2_perf_monitor;
   static SimpleAccMonitor *memory_perf_monitor;
+  
+  // Set utilization monitors
+  static SetUtilizationMonitor *l1d_util_monitor;
+  static SetUtilizationMonitor *l1i_util_monitor;
+  static SetUtilizationMonitor *l2_util_monitor;
   
   static int NC = 0;
   std::condition_variable xact_non_empty_notify, xact_non_full_notify;
@@ -272,6 +279,32 @@ namespace {
     }
     
     std::cout << "\n========================================" << std::endl;
+    
+    // Print Set Utilization Statistics
+    if (l1d_util_monitor) {
+      l1d_util_monitor->print_statistics("L1 Data Cache");
+    }
+    
+    if (l1i_util_monitor) {
+      l1i_util_monitor->print_statistics("L1 Instruction Cache");
+    }
+    
+    if (l2_util_monitor) {
+      l2_util_monitor->print_statistics("L2 Cache");
+    }
+    
+    // Export detailed set utilization to CSV files
+    if (l1d_util_monitor) {
+      l1d_util_monitor->export_to_csv("l1d_set_utilization.csv");
+    }
+    if (l1i_util_monitor) {
+      l1i_util_monitor->export_to_csv("l1i_set_utilization.csv");
+    }
+    if (l2_util_monitor) {
+      l2_util_monitor->export_to_csv("l2_set_utilization.csv");
+    }
+    
+    std::cout << "\n========================================" << std::endl;
   }
 
 }
@@ -322,6 +355,11 @@ namespace flexicas {
     l2_perf_monitor = new SimpleAccMonitor;
     memory_perf_monitor = new SimpleAccMonitor; 
 
+    // Create set utilization monitors
+    l1d_util_monitor = new SetUtilizationMonitor(1 << L1IW, 1 << L1WN);
+    l1i_util_monitor = new SetUtilizationMonitor(1 << L1IW, 1 << L1WN);
+    l2_util_monitor = new SetUtilizationMonitor(1 << L2IW, 1 << L2WN);
+
     for(int i=0; i<NC; i++) {
       l1i[i]->outer->connect(l2[i]->inner);
       l1d[i]->outer->connect(l2[i]->inner);
@@ -336,6 +374,11 @@ namespace flexicas {
       l1i[i]->attach_monitor(l1i_perf_monitor);
       l1d[i]->attach_monitor(l1d_perf_monitor);
       l2[i]->attach_monitor(l2_perf_monitor);
+      
+      // Attach utilization monitors
+      l1i[i]->attach_monitor(l1i_util_monitor);
+      l1d[i]->attach_monitor(l1d_util_monitor);
+      l2[i]->attach_monitor(l2_util_monitor);
     }
 
     mem->attach_monitor(memory_perf_monitor);
@@ -346,6 +389,11 @@ namespace flexicas {
     l1i_perf_monitor->start();
     l2_perf_monitor->start();
     memory_perf_monitor->start();
+    
+    // Start utilization monitoring
+    l1d_util_monitor->start();
+    l1i_util_monitor->start();
+    l2_util_monitor->start();
 
 #ifdef ENABLE_FLEXICAS_THREAD
     // set up the cache server

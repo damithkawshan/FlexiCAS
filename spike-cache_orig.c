@@ -3,7 +3,6 @@
 #include "cache/slicehash.hpp"
 #include "util/query.hpp"
 #include "flexicas-pfc.h"
-#include "cache/mesi.hpp"
 
 #include <list>
 #include <deque>
@@ -12,20 +11,21 @@
 #include <condition_variable>
 #include <chrono>
 #include <atomic>
-#include <iostream>
-#include <iomanip>
+//#include <iostream>
 
-// Embedded microprocessor configuration (similar to SiFive-style inclusive cache)
-// Small caches optimized for embedded systems with MESI inclusive hierarchy
+// intel coffe lake 9Gen: https://en.wikichip.org/wiki/intel/microarchitectures/coffee_lake
 
-// 2K 2W, both I and D (even smaller embedded L1 size)
-#define L1IW 4    // 2^4 = 16 sets, 16*64B*2 = 2KB
-#define L1WN 2    // 2^2 = 4-way set associative
+// 32K 8W, both I and D
+#define L1IW 6
+#define L1WN 8
 
-// 64K, 4W, inclusive (MESI protocol, similar to MOESI for embedded systems)
-#define L2IW 8    // 2^8 = 256 sets, 256*64B*4 = 64KB
-#define L2WN 2    // 2^2 = 4-way set associative
+// 256K, 4W, exclusive 
+#define L2IW 10
+#define L2WN 4
 
+// 2M per core
+#define L3IW (11+1)
+#define L3WN 16
 
 // multithread support
 #define ENABLE_FLEXICAS_THREAD
@@ -45,13 +45,6 @@ namespace {
   static std::vector<uint64_t> core_cycle; // record the cycle time in each core
   static uint64_t wall_clock;              // a wall clock shared by all cores
   static MonitorBase *tracer;
-  
-  // Performance monitors for each cache level
-  static SimpleAccMonitor *l1d_perf_monitor;
-  static SimpleAccMonitor *l1i_perf_monitor;
-  static SimpleAccMonitor *l2_perf_monitor;
-  static SimpleAccMonitor *memory_perf_monitor;
-  
   static int NC = 0;
   std::condition_variable xact_non_empty_notify, xact_non_full_notify;
   std::mutex xact_queue_op_mutex;
@@ -170,110 +163,6 @@ namespace {
 
   static std::string pfc_str; // a string buffer used by PFC's CSR interface
 
-  void print_cache_level_stats(const char* level_name, SimpleAccMonitor* monitor) {
-    if (!monitor) return;
-
-    auto total_access = monitor->get_access();
-    auto total_miss = monitor->get_miss();
-    auto total_read = monitor->get_access_read();
-    auto total_write = monitor->get_access_write();
-    auto read_miss = monitor->get_miss_read();
-    auto write_miss = monitor->get_miss_write();
-    auto invalidations = monitor->get_invalid();
-    
-    std::cout << "\n--- " << level_name << " Statistics ---" << std::endl;
-    std::cout << "Total Accesses:      " << std::setw(10) << total_access << std::endl;
-    std::cout << "Total Misses:        " << std::setw(10) << total_miss << std::endl;
-    std::cout << "Total Hits:          " << std::setw(10) << (total_access - total_miss) << std::endl;
-    std::cout << std::endl;
-    
-    std::cout << "Read Operations:     " << std::setw(10) << total_read << std::endl;
-    std::cout << "Write Operations:    " << std::setw(10) << total_write << std::endl;
-    std::cout << "Read Misses:         " << std::setw(10) << read_miss << std::endl;
-    std::cout << "Write Misses:        " << std::setw(10) << write_miss << std::endl;
-    std::cout << "Cache Invalidations: " << std::setw(10) << invalidations << std::endl;
-    std::cout << std::endl;
-    
-    // Calculate hit/miss rates
-    if (total_access > 0) {
-      double hit_rate = 100.0 * (total_access - total_miss) / total_access;
-      double miss_rate = 100.0 * total_miss / total_access;
-      
-      std::cout << "Overall Hit Rate:    " << std::setw(8) << hit_rate << "%" << std::endl;
-      std::cout << "Overall Miss Rate:   " << std::setw(8) << miss_rate << "%" << std::endl;
-      
-      if (total_read > 0) {
-        double read_hit_rate = 100.0 * (total_read - read_miss) / total_read;
-        double read_miss_rate = 100.0 * read_miss / total_read;
-        std::cout << "Read Hit Rate:       " << std::setw(8) << read_hit_rate << "%" << std::endl;
-        std::cout << "Read Miss Rate:      " << std::setw(8) << read_miss_rate << "%" << std::endl;
-      }
-      
-      if (total_write > 0) {
-        double write_hit_rate = 100.0 * (total_write - write_miss) / total_write;
-        double write_miss_rate = 100.0 * write_miss / total_write;
-        std::cout << "Write Hit Rate:      " << std::setw(8) << write_hit_rate << "%" << std::endl;
-        std::cout << "Write Miss Rate:     " << std::setw(8) << write_miss_rate << "%" << std::endl;
-      }
-    }
-  }
-
-  void print_cache_statistics() {
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "=== EMBEDDED CACHE PERFORMANCE (MESI Inclusive) ===" << std::endl;
-    std::cout << "========================================" << std::endl;
-    
-    // Print Cache Configuration
-    std::cout << "\n--- Cache Configuration ---" << std::endl;
-    std::cout << "Number of Cores:     " << NC << std::endl;
-    std::cout << "\nL1 Data Cache:" << std::endl;
-    std::cout << "  Size:              8 KB" << std::endl;
-    std::cout << "  Sets:              " << (1 << L1IW) << std::endl;
-    std::cout << "  Ways:              " << (1 << L1WN) << std::endl;
-    std::cout << "  Line Size:         64 bytes" << std::endl;
-    std::cout << "  Policy:            MESI (Inclusive)" << std::endl;
-    
-    std::cout << "\nL1 Instruction Cache:" << std::endl;
-    std::cout << "  Size:              8 KB" << std::endl;
-    std::cout << "  Sets:              " << (1 << L1IW) << std::endl;
-    std::cout << "  Ways:              " << (1 << L1WN) << std::endl;
-    std::cout << "  Line Size:         64 bytes" << std::endl;
-    std::cout << "  Policy:            MESI (Inclusive)" << std::endl;
-    
-    std::cout << "\nL2 Unified Cache:" << std::endl;
-    std::cout << "  Size:              64 KB" << std::endl;
-    std::cout << "  Sets:              " << (1 << L2IW) << std::endl;
-    std::cout << "  Ways:              " << (1 << L2WN) << std::endl;
-    std::cout << "  Line Size:         64 bytes" << std::endl;
-    std::cout << "  Policy:            MESI (Inclusive)" << std::endl;
-    std::cout << "  Hierarchy:         SiFive-style Inclusive Cache" << std::endl;
-    
-    std::cout << std::fixed << std::setprecision(2);
-    
-    // Print L1 Data Cache Statistics
-    print_cache_level_stats("L1 Data Cache", l1d_perf_monitor);
-    
-    // Print L1 Instruction Cache Statistics
-    print_cache_level_stats("L1 Instruction Cache", l1i_perf_monitor);
-    
-    // Print L2 Cache Statistics
-    print_cache_level_stats("L2 Cache", l2_perf_monitor);
-
-    // Memory Statistics
-    if (memory_perf_monitor) {
-      auto mem_access = memory_perf_monitor->get_access();
-      auto mem_read = memory_perf_monitor->get_access_read();
-      auto mem_write = memory_perf_monitor->get_access_write();
-      
-      std::cout << "\n--- Memory Statistics ---" << std::endl;
-      std::cout << "Total Memory Accesses: " << std::setw(10) << mem_access << std::endl;
-      std::cout << "Memory Reads:          " << std::setw(10) << mem_read << std::endl;
-      std::cout << "Memory Writes:         " << std::setw(10) << mem_write << std::endl;
-    }
-    
-    std::cout << "\n========================================" << std::endl;
-  }
-
 }
 
 namespace flexicas {
@@ -281,12 +170,13 @@ namespace flexicas {
 
   int  ncore() { return NC; }
 
-  int  cache_level() {return 2; }
+  int  cache_level() {return 3; }
 
   int  cache_set(int level, bool ic) {
     switch(level) {
     case 1: return 1 << L1IW;
     case 2: return 1 << L2IW;
+    case 3: return 1 << L3IW;
     default: return 0;
     }
   }
@@ -295,57 +185,45 @@ namespace flexicas {
     switch(level) {
     case 1: return 1 << L1WN;
     case 2: return 1 << L2WN;
+    case 3: return 1 << L3WN;
     default: return 0;
     }
   }
 
   void init(int ncore, const char *prefix) {
-    std::cout << "FlexiCAS Embedded Cache: 8KB L1 (I/D), 64KB L2 MESI Inclusive (SiFive-style)" << std::endl;
-    using policy_l2 = MESIPolicy<false, false, policy_memory>;
-    using policy_l1d = MESIPolicy<false, false, policy_l2>;  // L1 is not topmost in inclusive hierarchy
-    using policy_l1i = MESIPolicy<false, true, policy_l2>;   // L1I is instruction cache
+    using policy_l3 = MESIPolicy<false, true, policy_memory>;
+    using policy_l2 = ExclusiveMSIPolicy<false, false, policy_l3, false>;
+    using policy_l1d = MSIPolicy<true, false, policy_l2>;
+    using policy_l1i = MSIPolicy<true, true, policy_l2>;
     NC = ncore;
     core_cycle.resize(NC, 0);
     wall_clock = 0;
-    auto l1d = cache_gen_l1<L1IW, L1WN, void, MetadataBroadcastBase, ReplaceLRU, MESIPolicy, policy_l1d, false, void, true>(NC, "l1d");
+    auto l1d = cache_gen_l1<L1IW, L1WN, void, MetadataBroadcastBase, ReplaceLRU, MSIPolicy, policy_l1d, false, void, true>(NC, "l1d");
     core_data = get_l1_core_interface(l1d);
-    auto l1i = cache_gen_l1<L1IW, L1WN, void, MetadataBroadcastBase, ReplaceLRU, MESIPolicy, policy_l1i, true, void, true>(NC, "l1i");
+    auto l1i = cache_gen_l1<L1IW, L1WN, void, MetadataBroadcastBase, ReplaceLRU, MSIPolicy, policy_l1i, true, void, true>(NC, "l1i");
     core_inst = get_l1_core_interface(l1i);
-    auto l2 = cache_gen_inc<L2IW, L2WN, void, MetadataDirectoryBase, ReplaceLRU, MESIPolicy, policy_l2, false, void, true>(NC, "l2");
+    auto l2 = cache_gen_exc<L2IW, L2WN, void, MetadataBroadcastBase, ReplaceSRRIP, ExclusiveMSIPolicy, policy_l2, false, void, true>(NC, "l2");
+    auto l3 = cache_gen_inc<L3IW, L3WN, void, MetadataDirectoryBase, ReplaceSRRIP, MESIPolicy, policy_l3, true, void, true>(NC, "l3");
+    auto dispatcher = new SliceDispatcher<SliceHashNorm<> >("disp", NC);
     auto mem = new SimpleMemoryModel<void,void,true>("mem");
     tracer = new SimpleTracer(true);
     if(prefix) tracer->set_prefix(std::string(prefix));
 
-    // Create performance monitors for each cache level
-    l1d_perf_monitor = new SimpleAccMonitor;
-    l1i_perf_monitor = new SimpleAccMonitor;
-    l2_perf_monitor = new SimpleAccMonitor;
-    memory_perf_monitor = new SimpleAccMonitor; 
-
     for(int i=0; i<NC; i++) {
       l1i[i]->outer->connect(l2[i]->inner);
       l1d[i]->outer->connect(l2[i]->inner);
-      l2[i]->outer->connect(mem);
-      
-      // Attach monitors to all cache levels
+      dispatcher->connect(l3[i]->inner);
+      l2[i]->outer->connect_by_dispatch(dispatcher, l3[0]->inner);
+      if constexpr (!policy_l2::is_uncached()) // normally this check is useless as L2 is cached, but provied as an example
+        for(int j=1; j<NC; j++) l3[j]->inner->connect(l2[i]->outer);
+      l3[i]->outer->connect(mem);
       l1i[i]->attach_monitor(tracer);
       l1d[i]->attach_monitor(tracer);
       l2[i]->attach_monitor(tracer);
-      
-      // Attach performance monitors
-      l1i[i]->attach_monitor(l1i_perf_monitor);
-      l1d[i]->attach_monitor(l1d_perf_monitor);
-      l2[i]->attach_monitor(l2_perf_monitor);
+      l3[i]->attach_monitor(tracer);
     }
 
-    mem->attach_monitor(memory_perf_monitor);
     mem->attach_monitor(tracer);
-
-    // Start monitoring all levels
-    l1d_perf_monitor->start();
-    l1i_perf_monitor->start();
-    l2_perf_monitor->start();
-    memory_perf_monitor->start();
 
 #ifdef ENABLE_FLEXICAS_THREAD
     // set up the cache server
@@ -356,10 +234,6 @@ namespace flexicas {
 
   void exit() {
     exit_flag = true;
-    
-    // Print statistics before exiting
-    cache_sync();
-    print_cache_statistics();
   }
 
   void read(uint64_t addr, int core, bool ic) {
@@ -408,19 +282,11 @@ namespace flexicas {
 
   void csr_write(uint64_t cmd, int core, tlb_translate_func translator) {
     if((cmd & (~FLEXICAS_PFC_ADDR)) == FLEXICAS_PFC_CMD && (cmd & FLEXICAS_PFC_CMD_MASK) == FLEXICAS_PFC_START) {
-      l1d_perf_monitor->start();
-      l1i_perf_monitor->start();
-      l2_perf_monitor->start();
-      memory_perf_monitor->start();
       tracer->start();
       return;
     }
 
     if((cmd & (~FLEXICAS_PFC_ADDR)) == FLEXICAS_PFC_CMD && (cmd & FLEXICAS_PFC_CMD_MASK) == FLEXICAS_PFC_STOP) {
-      l1d_perf_monitor->stop();
-      l1i_perf_monitor->stop();
-      l2_perf_monitor->stop();
-      memory_perf_monitor->stop();
       tracer->stop();
       return;
     }
