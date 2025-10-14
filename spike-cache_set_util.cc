@@ -17,16 +17,16 @@
 #include <iomanip>
 #include <fstream>
 
-// Embedded microprocessor configuration (similar to SiFive-style inclusive cache)
+// Embedded microprocessor configuration (similar to ARM Cortex-M7/SiFive E76)
 // Small caches optimized for embedded systems with MESI inclusive hierarchy
 
-// 2K 2W, both I and D (even smaller embedded L1 size)
-#define L1IW 4    // 2^4 = 16 sets, 16*64B*2 = 2KB
+// 8KB L1, 4-way set associative (typical for embedded processors like Cortex-M7)
+#define L1IW 5    // 2^5 = 32 sets, 32*64B*4 = 8KB
 #define L1WN 2    // 2^2 = 4-way set associative
 
-// 64K, 4W, inclusive (MESI protocol, similar to MOESI for embedded systems)
-#define L2IW 9    // Modified by gen_test.sh
-#define L2WN 1    // Modified by gen_test.sh
+// 128KB L2, 8-way inclusive (typical for embedded SoCs)
+#define L2IW 8    // 2^8 = 256 sets, 256*64B*8 = 128KB
+#define L2WN 3    // 2^3 = 8-way set associative
 
 
 // multithread support
@@ -296,12 +296,15 @@ namespace {
     // Export detailed set utilization to CSV files
     if (l1d_util_monitor) {
       l1d_util_monitor->export_to_csv("l1d_set_utilization.csv");
+      l1d_util_monitor->export_eviction_history_to_csv("l1d_eviction_history.csv");
     }
     if (l1i_util_monitor) {
       l1i_util_monitor->export_to_csv("l1i_set_utilization.csv");
+      l1i_util_monitor->export_eviction_history_to_csv("l1i_eviction_history.csv");
     }
     if (l2_util_monitor) {
       l2_util_monitor->export_to_csv("l2_set_utilization.csv");
+      l2_util_monitor->export_eviction_history_to_csv("l2_eviction_history.csv");
     }
     
     std::cout << "\n========================================" << std::endl;
@@ -333,7 +336,7 @@ namespace flexicas {
   }
 
   void init(int ncore, const char *prefix) {
-    std::cout << "FlexiCAS Embedded Cache: 8KB L1 (I/D), 64KB L2 MESI Inclusive (SiFive-style)" << std::endl;
+    std::cout << "FlexiCAS Embedded Cache: 8KB L1 (I/D), 128KB L2 MESI Inclusive (ARM Cortex-M7/SiFive E76 style)" << std::endl;
     using policy_l2 = MESIPolicy<false, false, policy_memory>;
     using policy_l1d = MESIPolicy<false, false, policy_l2>;  // L1 is not topmost in inclusive hierarchy
     using policy_l1i = MESIPolicy<false, true, policy_l2>;   // L1I is instruction cache
