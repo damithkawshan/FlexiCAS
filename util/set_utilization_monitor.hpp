@@ -114,7 +114,7 @@ public:
       msg.append(" [").append(meta->to_string()).append("]");
     else if(data)
       msg.append("      ");
-    std::cout << msg << std::endl;
+    // std::cout << msg << std::endl;
     
     // Track eviction
     total_evictions++;

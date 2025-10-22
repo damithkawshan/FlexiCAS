@@ -16,17 +16,39 @@
 #include <iostream>
 #include <iomanip>
 #include <fstream>
+#include "flexicas/cache_config.h"
+
+// // 32K 8W, both I and D
+// #define L1IW 6
+// #define L1WN 8
+
+// // 256K, 4W, exclusive 
+// #define L2IW 10
+// #define L2WN 4
+
 
 // Embedded microprocessor configuration (similar to ARM Cortex-M7/SiFive E76)
 // Small caches optimized for embedded systems with MESI inclusive hierarchy
 
+#ifndef CACHE_LINE_SIZE
+#define CACHE_LINE_SIZE 64  // 64 bytes cache line
+#endif
+
 // 8KB L1, 4-way set associative (typical for embedded processors like Cortex-M7)
-#define L1IW 5    // 2^5 = 32 sets, 32*64B*4 = 8KB
-#define L1WN 2    // 2^2 = 4-way set associative
+#ifndef L1IW
+#define L1IW 8    // 2^8 = 256 sets, 256*64B*4 = 8KB
+#endif
+#ifndef L1WN
+#define L1WN 4    // 4-way set associative
+#endif
 
 // 128KB L2, 8-way inclusive (typical for embedded SoCs)
-#define L2IW 8    // 2^8 = 256 sets, 256*64B*8 = 128KB
-#define L2WN 3    // 2^3 = 8-way set associative
+#ifndef L2IW
+#define L2IW 9   // 2^9 = 512 sets, 512*64B*4 = 128KB
+#endif
+#ifndef L2WN
+#define L2WN 4   // 4-way set associative
+#endif
 
 
 // multithread support
@@ -233,27 +255,9 @@ namespace {
     // Print Cache Configuration
     std::cout << "\n--- Cache Configuration ---" << std::endl;
     std::cout << "Number of Cores:     " << NC << std::endl;
-    std::cout << "\nL1 Data Cache:" << std::endl;
-    std::cout << "  Size:              8 KB" << std::endl;
-    std::cout << "  Sets:              " << (1 << L1IW) << std::endl;
-    std::cout << "  Ways:              " << (1 << L1WN) << std::endl;
-    std::cout << "  Line Size:         64 bytes" << std::endl;
-    std::cout << "  Policy:            MESI (Inclusive)" << std::endl;
-    
-    std::cout << "\nL1 Instruction Cache:" << std::endl;
-    std::cout << "  Size:              8 KB" << std::endl;
-    std::cout << "  Sets:              " << (1 << L1IW) << std::endl;
-    std::cout << "  Ways:              " << (1 << L1WN) << std::endl;
-    std::cout << "  Line Size:         64 bytes" << std::endl;
-    std::cout << "  Policy:            MESI (Inclusive)" << std::endl;
-    
-    std::cout << "\nL2 Unified Cache:" << std::endl;
-    std::cout << "  Size:              64 KB" << std::endl;
-    std::cout << "  Sets:              " << (1 << L2IW) << std::endl;
-    std::cout << "  Ways:              " << (1 << L2WN) << std::endl;
-    std::cout << "  Line Size:         64 bytes" << std::endl;
-    std::cout << "  Policy:            MESI (Inclusive)" << std::endl;
-    std::cout << "  Hierarchy:         SiFive-style Inclusive Cache" << std::endl;
+    std::cout << "L1 Data Cache:       " << (1 << L1IW) * CACHE_LINE_SIZE * L1WN / 1024 << "KB, " << (L1WN) << "-way set associative" << std::endl;
+    std::cout << "\nL1 Instruction Cache " << (1 << L1IW) * CACHE_LINE_SIZE * L1WN / 1024 << "KB, " << (L1WN) << "-way set associative" << std::endl;
+    std::cout << "\nL2 Cache:            " << (1 << L2IW) * CACHE_LINE_SIZE * L2WN / 1024 << "KB, " << (L2WN) << "-way set associative" << std::endl;
     
     std::cout << std::fixed << std::setprecision(2);
     
@@ -329,14 +333,17 @@ namespace flexicas {
 
   int  cache_way(int level, bool ic) {
     switch(level) {
-    case 1: return 1 << L1WN;
-    case 2: return 1 << L2WN;
+    case 1: return L1WN;
+    case 2: return L2WN;
     default: return 0;
     }
   }
 
   void init(int ncore, const char *prefix) {
-    std::cout << "FlexiCAS Embedded Cache: 8KB L1 (I/D), 128KB L2 MESI Inclusive (ARM Cortex-M7/SiFive E76 style)" << std::endl;
+    std::cout << "Initializing FlexiCAS Embedded Cache Model with " << ncore << " cores..." << std::endl;
+    std::cout << "\nL1 Data Cache:       " << (1 << L1IW) * CACHE_LINE_SIZE * L1WN / 1024 << "KB, " << (L1WN) << "-way set associative" << std::endl;
+    std::cout << "L1 Instruction Cache: " << (1 << L1IW) * CACHE_LINE_SIZE * L1WN / 1024 << "KB, " << (L1WN) << "-way set associative" << std::endl;
+    std::cout << "L2 Cache:            " << (1 << L2IW) * CACHE_LINE_SIZE * L2WN / 1024 << "KB, " << (L2WN) << "-way set associative" << std::endl;
     using policy_l2 = MESIPolicy<false, false, policy_memory>;
     using policy_l1d = MESIPolicy<false, false, policy_l2>;  // L1 is not topmost in inclusive hierarchy
     using policy_l1i = MESIPolicy<false, true, policy_l2>;   // L1I is instruction cache
@@ -347,7 +354,7 @@ namespace flexicas {
     core_data = get_l1_core_interface(l1d);
     auto l1i = cache_gen_l1<L1IW, L1WN, void, MetadataBroadcastBase, ReplaceLRU, MESIPolicy, policy_l1i, true, void, true>(NC, "l1i");
     core_inst = get_l1_core_interface(l1i);
-    auto l2 = cache_gen_inc<L2IW, L2WN, void, MetadataDirectoryBase, ReplaceLRU, MESIPolicy, policy_l2, false, void, true>(NC, "l2");
+    auto l2 = cache_gen_inc<L2IW, L2WN, void, MetadataDirectoryBase, ReplaceSRRIP, MESIPolicy, policy_l2, false, void, true>(NC, "l2");
     auto mem = new SimpleMemoryModel<void,void,true>("mem");
     tracer = new SimpleTracer(true);
     if(prefix) tracer->set_prefix(std::string(prefix));
@@ -359,9 +366,9 @@ namespace flexicas {
     memory_perf_monitor = new SimpleAccMonitor; 
 
     // Create set utilization monitors
-    l1d_util_monitor = new SetUtilizationMonitor(1 << L1IW, 1 << L1WN);
-    l1i_util_monitor = new SetUtilizationMonitor(1 << L1IW, 1 << L1WN);
-    l2_util_monitor = new SetUtilizationMonitor(1 << L2IW, 1 << L2WN);
+    l1d_util_monitor = new SetUtilizationMonitor(1 << L1IW, L1WN);
+    l1i_util_monitor = new SetUtilizationMonitor(1 << L1IW, L1WN);
+    l2_util_monitor = new SetUtilizationMonitor(1 << L2IW, L2WN);
 
     for(int i=0; i<NC; i++) {
       l1i[i]->outer->connect(l2[i]->inner);
@@ -386,6 +393,9 @@ namespace flexicas {
 
     mem->attach_monitor(memory_perf_monitor);
     mem->attach_monitor(tracer);
+
+    //start tracer
+    // tracer->start();
 
     // Start monitoring all levels
     l1d_perf_monitor->start();
