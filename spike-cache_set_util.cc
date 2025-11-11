@@ -6,6 +6,8 @@
 #include "cache/mesi.hpp"
 #include "util/set_utilization_monitor.hpp"
 #include "util/reuse_count_monitor.hpp"
+#include "cache/sbc.hpp"
+#include "cache/coherence.hpp"
 
 #include <list>
 #include <deque>
@@ -83,7 +85,7 @@ namespace {
   static SetUtilizationMonitor *l2_util_monitor;
 
   // Reuse count monitor for L2 cache
-  static ReuseCountMonitor *l2_reuse_monitor;
+  // static ReuseCountMonitor *l2_reuse_monitor;
 
   static int NC = 0;
   std::condition_variable xact_non_empty_notify, xact_non_full_notify;
@@ -287,14 +289,14 @@ namespace {
     }
 
     // Print L2 Reuse Count Analysis
-    if (l2_reuse_monitor) {
-      l2_reuse_monitor->print_statistics("L2 Cache");
+    // if (l2_reuse_monitor) {
+    //   l2_reuse_monitor->print_statistics("L2 Cache");
 
-      // Export reuse distribution to CSV files
-      l2_reuse_monitor->export_reuse_distribution_csv("l2_reuse_distribution.csv");
-      l2_reuse_monitor->export_eviction_history_csv("l2_reuse_eviction_history.csv");
-      l2_reuse_monitor->export_summary_txt("l2_reuse_summary.txt");
-    }
+    //   // Export reuse distribution to CSV files
+    //   l2_reuse_monitor->export_reuse_distribution_csv("l2_reuse_distribution.csv");
+    //   l2_reuse_monitor->export_eviction_history_csv("l2_reuse_eviction_history.csv");
+    //   l2_reuse_monitor->export_summary_txt("l2_reuse_summary.txt");
+    // }
 
     std::cout << "\n========================================" << std::endl;
     
@@ -314,15 +316,15 @@ namespace {
     // Export detailed set utilization to CSV files
     if (l1d_util_monitor) {
       l1d_util_monitor->export_to_csv("l1d_set_utilization.csv");
-      l1d_util_monitor->export_eviction_history_to_csv("l1d_eviction_history.csv");
+      // l1d_util_monitor->export_eviction_history_to_csv("l1d_eviction_history.csv");
     }
     if (l1i_util_monitor) {
       l1i_util_monitor->export_to_csv("l1i_set_utilization.csv");
-      l1i_util_monitor->export_eviction_history_to_csv("l1i_eviction_history.csv");
+      // l1i_util_monitor->export_eviction_history_to_csv("l1i_eviction_history.csv");
     }
     if (l2_util_monitor) {
       l2_util_monitor->export_to_csv("l2_set_utilization.csv");
-      l2_util_monitor->export_eviction_history_to_csv("l2_eviction_history.csv");
+      // l2_util_monitor->export_eviction_history_to_csv("l2_eviction_history.csv");
     }
     
     std::cout << "\n========================================" << std::endl;
@@ -368,6 +370,8 @@ namespace flexicas {
     core_data = get_l1_core_interface(l1d);
     auto l1i = cache_gen_l1<L1IW, L1WN, void, MetadataBroadcastBase, ReplaceLRU, MESIPolicy, policy_l1i, true, void, true>(NC, "l1i");
     core_inst = get_l1_core_interface(l1i);
+    // Use Dynamic SBC with logging enabled
+    // auto l2 = cache_gen_dsbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-dsbc");
     auto l2 = cache_gen_inc<L2IW, L2WN, void, MetadataDirectoryBase, ReplaceSRRIP, MESIPolicy, policy_l2, false, void, true>(NC, "l2");
     auto mem = new SimpleMemoryModel<void,void,true>("mem");
     tracer = new SimpleTracer(true);
@@ -380,7 +384,7 @@ namespace flexicas {
     memory_perf_monitor = new SimpleAccMonitor; 
 
     // Create reuse count monitor for L2 (track up to 10000 evictions in history)
-    l2_reuse_monitor = new ReuseCountMonitor(1 << L2IW, L2WN, 10000);
+    // l2_reuse_monitor = new ReuseCountMonitor(1 << L2IW, L2WN, 10000);
 
     // Create set utilization monitors
     l1d_util_monitor = new SetUtilizationMonitor(1 << L1IW, L1WN);
@@ -408,7 +412,7 @@ namespace flexicas {
       l2[i]->attach_monitor(l2_util_monitor);
 
       // Attach reuse count monitor to L2 cache
-      l2[i]->attach_monitor(l2_reuse_monitor);
+      // l2[i]->attach_monitor(l2_reuse_monitor);
     }
 
     mem->attach_monitor(memory_perf_monitor);
@@ -418,18 +422,18 @@ namespace flexicas {
     // tracer->start();
 
     // Start monitoring all levels
-    l1d_perf_monitor->start();
-    l1i_perf_monitor->start();
-    l2_perf_monitor->start();
-    memory_perf_monitor->start();
+    // l1d_perf_monitor->start();
+    // l1i_perf_monitor->start();
+    // l2_perf_monitor->start();
+    // memory_perf_monitor->start();
     
-    // Start utilization monitoring
-    l1d_util_monitor->start();
-    l1i_util_monitor->start();
-    l2_util_monitor->start();
+    // // Start utilization monitoring
+    // l1d_util_monitor->start();
+    // l1i_util_monitor->start();
+    // l2_util_monitor->start();
 
     // Start reuse count monitoring
-    l2_reuse_monitor->start();
+    // l2_reuse_monitor->start();
 
 #ifdef ENABLE_FLEXICAS_THREAD
     // set up the cache server
@@ -444,7 +448,7 @@ namespace flexicas {
     l1i_perf_monitor->stop();
     l2_perf_monitor->stop();
     memory_perf_monitor->stop();
-    l2_reuse_monitor->stop();
+    // l2_reuse_monitor->stop();
     tracer->stop();
     
     // Print statistics before exiting
@@ -498,12 +502,27 @@ namespace flexicas {
 
   void csr_write(uint64_t cmd, int core, tlb_translate_func translator) {
     if((cmd & (~FLEXICAS_PFC_ADDR)) == FLEXICAS_PFC_CMD && (cmd & FLEXICAS_PFC_CMD_MASK) == FLEXICAS_PFC_START) {
+      l1d_perf_monitor->reset();
+      l1i_perf_monitor->reset();
+      l2_perf_monitor->reset();
+      memory_perf_monitor->reset();
+
+      l1d_util_monitor->reset();
+      l1i_util_monitor->reset();
+      l2_util_monitor->reset();
+
+      // l2_reuse_monitor->reset();
       l1d_perf_monitor->start();
       l1i_perf_monitor->start();
       l2_perf_monitor->start();
       memory_perf_monitor->start();
-      l2_reuse_monitor->start();
-      tracer->start();
+
+      l1d_util_monitor->start();
+      l1i_util_monitor->start();
+      l2_util_monitor->start();
+
+      // l2_reuse_monitor->start();
+      // tracer->start();
       return;
     }
 
@@ -512,8 +531,22 @@ namespace flexicas {
       l1i_perf_monitor->stop();
       l2_perf_monitor->stop();
       memory_perf_monitor->stop();
-      l2_reuse_monitor->stop();
-      tracer->stop();
+
+      l1d_util_monitor->stop();
+      l1i_util_monitor->stop();
+      l2_util_monitor->stop();
+
+      // l2_reuse_monitor->stop();
+      // tracer->stop();
+      print_cache_statistics();
+      l1d_perf_monitor->reset();
+      l1i_perf_monitor->reset();
+      l2_perf_monitor->reset();
+      memory_perf_monitor->reset();
+
+      l1d_util_monitor->reset();
+      l1i_util_monitor->reset();
+      l2_util_monitor->reset();
       return;
     }
 
