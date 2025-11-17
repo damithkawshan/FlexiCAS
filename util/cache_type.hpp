@@ -9,6 +9,7 @@
 #include "cache/index.hpp"
 #include "cache/replace.hpp"
 #include "cache/memory.hpp"
+#include "cache/sbc.hpp"
 
 namespace ct {
   template<typename MT>
@@ -173,6 +174,50 @@ namespace ct {
       }
     };
   }
+
+  // Set Balancing Cache (SBC) helpers
+  namespace sbc {
+    template<int IW, int NW, typename DT, typename MT, bool IS_DYNAMIC,
+             template <bool, bool, typename> class CPT, typename Policy,
+             bool uncached, typename DLY, bool EnMon, bool EnMT = false>
+    struct types {
+      using index_type = IndexNorm<IW, 6>;
+      using replace_type = std::conditional_t<IS_DYNAMIC, ReplaceDSBC<IW, NW>, ReplaceSSBC<IW, NW>>;
+      // Wrap the provided metadata type with SBC extensions
+      using metadata_type = MetadataSBC<48, IW, IW+6, MT>;
+      using cache_base_type = CacheSBC<IW, NW, metadata_type, DT, index_type, replace_type, DLY, EnMon, EnMT>;
+      using input_type = ct::input_port_type<Policy, false, false, false, EnMT>;
+      using output_type = ct::output_port_type<Policy, uncached, false, false, EnMT>;
+      using cache_type = CoherentCacheNorm<cache_base_type, output_type, input_type>;
+    };
+  }
+}
+
+// Set Balancing Cache generators
+template<int IW, int WN, typename DT, typename MT, bool IS_DYNAMIC,
+         template <bool, bool, typename> class CPT, typename Policy,
+         bool uncached, typename DLY, bool EnMon, bool EnMT = false>
+inline auto cache_gen_sbc(int size, const std::string& name_prefix) {
+  using sbc_types = ct::sbc::types<IW, WN, DT, MT, IS_DYNAMIC, CPT, Policy, uncached, DLY, EnMon, EnMT>;
+  return cache_generator<typename sbc_types::cache_type>(size, name_prefix);
+}
+
+// Static SBC (SSBC) - fixed partner sets
+template<int IW, int WN, typename DT, typename MT,
+         template <bool, bool, typename> class CPT, typename Policy,
+         bool uncached, typename DLY, bool EnMon, bool EnMT = false>
+inline auto cache_gen_ssbc(int size, const std::string& name_prefix) {
+  std::cout << "Generating SSBC cache type\n";
+  return cache_gen_sbc<IW, WN, DT, MT, false, CPT, Policy, uncached, DLY, EnMon, EnMT>(size, name_prefix);
+}
+
+// Dynamic SBC (DSBC) - adaptive destination selection
+template<int IW, int WN, typename DT, typename MT,
+         template <bool, bool, typename> class CPT, typename Policy,
+         bool uncached, typename DLY, bool EnMon, bool EnMT = false>
+inline auto cache_gen_dsbc(int size, const std::string& name_prefix) {
+  std::cout << "Generating DSBC cache type\n";
+  return cache_gen_sbc<IW, WN, DT, MT, true, CPT, Policy, uncached, DLY, EnMon, EnMT>(size, name_prefix);
 }
 
 #endif
