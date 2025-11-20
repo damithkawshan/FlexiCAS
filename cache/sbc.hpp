@@ -152,12 +152,12 @@ public:
       for(uint32_t i=0; i<NW; i++) s[i] = i;
     }
     
-    // Initialize static partner mapping (XOR with middle bit pattern)
+    // Initialize static partner mapping (complement MSB)
     // This distributes partners across the cache
     if constexpr (!IS_DYNAMIC) {
-      uint32_t xor_mask = 1ul << (IW / 2); // XOR with middle bit
+      uint32_t msb_mask = 1ul << (IW - 1); // Complement MSB
       for(uint32_t s = 0; s < nset; s++) {
-        partner_set[s] = s ^ xor_mask;
+        partner_set[s] = s ^ msb_mask;
         //print partner set for 10,5,14 and 2
         if (s == 10 || s == 5 || s == 14 || s == 2) {
           std::cout << "Set " << s << " partner: " << partner_set[s] << std::endl;
@@ -532,7 +532,9 @@ public:
       uint32_t dest_set = replacer[0].get_displacement_destination(*s);
       bool secondary_search = (dest_set != *s);
       
-      if(dest_set != *s && replacer[0].get_free_num(dest_set) > 0) {
+      // Check if destination set saturation is lower than source (room for improvement)
+      uint32_t dest_saturation = replacer[0].get_saturation(dest_set);
+      if(dest_set != *s && dest_saturation < src_saturation) {
         // Displacement is possible
         successful_displacements++;
         
@@ -546,7 +548,6 @@ public:
         if(victim_meta->is_valid()) {
           uint64_t victim_addr = victim_meta->addr(*s);
           uint32_t dest_way;
-          uint32_t dest_saturation = replacer[0].get_saturation(dest_set);
           
           // Check if victim was already displaced
           bool victim_was_displaced = false;
@@ -692,6 +693,13 @@ public:
    */
   void get_saturation_stats(uint32_t *avg, uint32_t *max, uint32_t *num_sat) const {
     replacer[0].get_stats(avg, max, num_sat);
+  }
+  
+  /**
+   * Get saturation counter value for a specific set
+   */
+  uint32_t get_saturation_counter(uint32_t set_index) const {
+    return replacer[0].get_saturation(set_index);
   }
 };
 

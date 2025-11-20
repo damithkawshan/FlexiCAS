@@ -371,8 +371,8 @@ namespace flexicas {
     auto l1i = cache_gen_l1<L1IW, L1WN, void, MetadataBroadcastBase, ReplaceLRU, MESIPolicy, policy_l1i, true, void, true>(NC, "l1i");
     core_inst = get_l1_core_interface(l1i);
     // Use Dynamic SBC with logging enabled
-    // auto l2 = cache_gen_dsbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-dsbc"); std::cout << "Using Dynamic SBC for L2 Cache" << std::endl;
-    auto l2 = cache_gen_ssbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-ssbc"); std::cout << "Using Static SBC for L2 Cache" << std::endl;
+    auto l2 = cache_gen_dsbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-dsbc"); std::cout << "Using Dynamic SBC for L2 Cache" << std::endl;
+    // auto l2 = cache_gen_ssbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-ssbc"); std::cout << "Using Static SBC for L2 Cache" << std::endl;
     // auto l2 = cache_gen_inc<L2IW, L2WN, void, MetadataDirectoryBase, ReplaceLRU, MESIPolicy, policy_l2, false, void, true>(NC, "l2");  std::cout << "Using Inclusive LRU for L2 Cache" << std::endl;
     auto mem = new SimpleMemoryModel<void,void,true>("mem");
     tracer = new SimpleTracer(true);
