@@ -314,17 +314,23 @@ namespace {
     }
     
     // Export detailed set utilization to CSV files
-    if (l1d_util_monitor) {
-      l1d_util_monitor->export_to_csv("l1d_set_utilization.csv");
-      // l1d_util_monitor->export_eviction_history_to_csv("l1d_eviction_history.csv");
-    }
-    if (l1i_util_monitor) {
-      l1i_util_monitor->export_to_csv("l1i_set_utilization.csv");
-      // l1i_util_monitor->export_eviction_history_to_csv("l1i_eviction_history.csv");
-    }
-    if (l2_util_monitor) {
-      l2_util_monitor->export_to_csv("l2_set_utilization.csv");
-      // l2_util_monitor->export_eviction_history_to_csv("l2_eviction_history.csv");
+    if (l1d_util_monitor || l1i_util_monitor || l2_util_monitor) {
+      // Compute cache sizes in KB for filename suffixes
+      uint32_t l1_size_kb = (1u << L1IW) * CACHE_LINE_SIZE * L1WN / 1024u;
+      uint32_t l2_size_kb = (1u << L2IW) * CACHE_LINE_SIZE * L2WN / 1024u;
+
+      if (l1d_util_monitor) {
+        l1d_util_monitor->export_to_csv("l1d_set_utilization_" + std::to_string(l1_size_kb) + "KB.csv");
+        // l1d_util_monitor->export_eviction_history_to_csv("l1d_eviction_history_" + std::to_string(l1_size_kb) + "KB.csv");
+      }
+      if (l1i_util_monitor) {
+        l1i_util_monitor->export_to_csv("l1i_set_utilization_" + std::to_string(l1_size_kb) + "KB.csv");
+        // l1i_util_monitor->export_eviction_history_to_csv("l1i_eviction_history_" + std::to_string(l1_size_kb) + "KB.csv");
+      }
+      if (l2_util_monitor) {
+        l2_util_monitor->export_to_csv("l2_set_utilization_" + std::to_string(l2_size_kb) + "KB.csv");
+        // l2_util_monitor->export_eviction_history_to_csv("l2_eviction_history_" + std::to_string(l2_size_kb) + "KB.csv");
+      }
     }
     
     std::cout << "\n========================================" << std::endl;
@@ -356,6 +362,7 @@ namespace flexicas {
   }
 
   void init(int ncore, const char *prefix) {
+    std::cout << "================ 27/11/2025 6.14PM =============" << std::endl;
     std::cout << "Initializing FlexiCAS Embedded Cache Model with " << ncore << " cores..." << std::endl;
     std::cout << "\nL1 Data Cache:       " << (1 << L1IW) * CACHE_LINE_SIZE * L1WN / 1024 << "KB, " << (L1WN) << "-way set associative" << std::endl;
     std::cout << "L1 Instruction Cache: " << (1 << L1IW) * CACHE_LINE_SIZE * L1WN / 1024 << "KB, " << (L1WN) << "-way set associative" << std::endl;
@@ -370,9 +377,9 @@ namespace flexicas {
     core_data = get_l1_core_interface(l1d);
     auto l1i = cache_gen_l1<L1IW, L1WN, void, MetadataBroadcastBase, ReplaceLRU, MESIPolicy, policy_l1i, true, void, true>(NC, "l1i");
     core_inst = get_l1_core_interface(l1i);
-    // Use Dynamic SBC with logging enabled
-    // auto l2 = cache_gen_dsbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-dsbc"); std::cout << "Using Dynamic SBC for L2 Cache" << std::endl;
-    auto l2 = cache_gen_ssbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-ssbc"); std::cout << "Using Static SBC for L2 Cache" << std::endl;
+    // Use Dynamic SBC with logging disabled by default (change last parameter to true to enable)
+    auto l2 = cache_gen_dsbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-dsbc", false); std::cout << "Using Dynamic SBC for L2 Cache" << std::endl;
+    // auto l2 = cache_gen_ssbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-ssbc", false); std::cout << "Using Static SBC for L2 Cache" << std::endl;
     // auto l2 = cache_gen_inc<L2IW, L2WN, void, MetadataDirectoryBase, ReplaceLRU, MESIPolicy, policy_l2, false, void, true>(NC, "l2");  std::cout << "Using Inclusive LRU for L2 Cache" << std::endl;
     auto mem = new SimpleMemoryModel<void,void,true>("mem");
     tracer = new SimpleTracer(true);
@@ -385,7 +392,7 @@ namespace flexicas {
     memory_perf_monitor = new SimpleAccMonitor; 
 
     // Create reuse count monitor for L2 (track up to 10000 evictions in history)
-    // l2_reuse_monitor = new ReuseCountMonitor(1 << L2IW, L2WN, 10000);
+    // l2_reuse_monitor = new ReuseCountMonitor(1 << L2IW, L2WN, 10000000);
 
     // Create set utilization monitors
     l1d_util_monitor = new SetUtilizationMonitor(1 << L1IW, L1WN);
