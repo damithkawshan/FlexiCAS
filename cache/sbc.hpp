@@ -533,8 +533,9 @@ public:
       // Try to displace to another set
       uint32_t dest_set = replacer[0].get_displacement_destination(*s);
       bool secondary_search = (dest_set != *s);
+      uint32_t dest_saturation = replacer[0].get_saturation(dest_set);
       
-      if(dest_set != *s && replacer[0].get_free_num(dest_set) > 0) {
+      if(dest_set != *s && dest_saturation < 8) {
         // Displacement is possible
         successful_displacements++;
         
