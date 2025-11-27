@@ -72,9 +72,9 @@ namespace ct {
 }
 
 template<typename CT>
-inline std::vector<CoherentCacheBase *> cache_generator(int size, const std::string& name_prefix) {
+inline std::vector<CoherentCacheBase *> cache_generator(int size, const std::string& name_prefix, bool enable_logging = false) {
   auto array = std::vector<CoherentCacheBase *>(size);
-  for(int i=0; i<size; i++) array[i] = new CT(name_prefix + (size > 1 ? "-"+std::to_string(i) : ""));
+  for(int i=0; i<size; i++) array[i] = new CT(name_prefix + (size > 1 ? "-"+std::to_string(i) : ""), enable_logging);
   return array;
 }
 
@@ -197,27 +197,27 @@ namespace ct {
 template<int IW, int WN, typename DT, typename MT, bool IS_DYNAMIC,
          template <bool, bool, typename> class CPT, typename Policy,
          bool uncached, typename DLY, bool EnMon, bool EnMT = false>
-inline auto cache_gen_sbc(int size, const std::string& name_prefix) {
+inline auto cache_gen_sbc(int size, const std::string& name_prefix, bool enable_logging = false) {
   using sbc_types = ct::sbc::types<IW, WN, DT, MT, IS_DYNAMIC, CPT, Policy, uncached, DLY, EnMon, EnMT>;
-  return cache_generator<typename sbc_types::cache_type>(size, name_prefix);
+  return cache_generator<typename sbc_types::cache_type>(size, name_prefix, enable_logging);
 }
 
 // Static SBC (SSBC) - fixed partner sets
 template<int IW, int WN, typename DT, typename MT,
          template <bool, bool, typename> class CPT, typename Policy,
          bool uncached, typename DLY, bool EnMon, bool EnMT = false>
-inline auto cache_gen_ssbc(int size, const std::string& name_prefix) {
+inline auto cache_gen_ssbc(int size, const std::string& name_prefix, bool enable_logging = false) {
   std::cout << "Generating SSBC cache type\n";
-  return cache_gen_sbc<IW, WN, DT, MT, false, CPT, Policy, uncached, DLY, EnMon, EnMT>(size, name_prefix);
+  return cache_gen_sbc<IW, WN, DT, MT, false, CPT, Policy, uncached, DLY, EnMon, EnMT>(size, name_prefix, enable_logging);
 }
 
 // Dynamic SBC (DSBC) - adaptive destination selection
 template<int IW, int WN, typename DT, typename MT,
          template <bool, bool, typename> class CPT, typename Policy,
          bool uncached, typename DLY, bool EnMon, bool EnMT = false>
-inline auto cache_gen_dsbc(int size, const std::string& name_prefix) {
+inline auto cache_gen_dsbc(int size, const std::string& name_prefix, bool enable_logging = false) {
   std::cout << "Generating DSBC cache type\n";
-  return cache_gen_sbc<IW, WN, DT, MT, true, CPT, Policy, uncached, DLY, EnMon, EnMT>(size, name_prefix);
+  return cache_gen_sbc<IW, WN, DT, MT, true, CPT, Policy, uncached, DLY, EnMon, EnMT>(size, name_prefix, enable_logging);
 }
 
 #endif

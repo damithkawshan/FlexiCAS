@@ -481,9 +481,11 @@ protected:
   SBCLogger* sbc_logger = nullptr;
 
 public:
-  CacheSBC(std::string name, bool enable_logging = true) : CacheT(name) {
+  CacheSBC(std::string name, bool enable_logging = false) : CacheT(name, enable_logging) {
     if(enable_logging) {
-      std::string log_filename = "log_sbc_" + name + ".log";
+      // Calculate cache size in KB: (2^IW sets) * NW ways * 64 bytes per line / 1024
+      uint32_t cache_size_kb = (1ul << IW) * NW * 64 / 1024;
+      std::string log_filename = "log_sbc_" + name + "_" + std::to_string(cache_size_kb) + "KB.log";
       sbc_logger = new SBCLogger(log_filename, true);
     }
   }
@@ -546,7 +548,6 @@ public:
         if(victim_meta->is_valid()) {
           uint64_t victim_addr = victim_meta->addr(*s);
           uint32_t dest_way;
-          uint32_t dest_saturation = replacer[0].get_saturation(dest_set);
           
           // Check if victim was already displaced
           bool victim_was_displaced = false;

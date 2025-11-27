@@ -215,7 +215,7 @@ protected:
   std::condition_variable              meta_buffer_cv;
 
 public:
-  CacheSkewed(std::string name, unsigned int extra_par = 0, unsigned int extra_way = 0)
+  CacheSkewed(std::string name, bool enable_logging = false, unsigned int extra_par = 0, unsigned int extra_way = 0)
     : CacheBase(name), meta_buffer_pool(MSHR)
   {
     arrays.resize(P+extra_par);

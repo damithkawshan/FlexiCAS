@@ -542,8 +542,8 @@ template<typename CacheT, typename OuterT, class InnerT>
 class CoherentCacheNorm : public CoherentCacheBase
 {
 public:
-  CoherentCacheNorm(std::string name = "")
-    : CoherentCacheBase(new CacheT(name), new OuterT, new InnerT, name) {}
+  CoherentCacheNorm(std::string name = "", bool enable_logging = false)
+    : CoherentCacheBase(new CacheT(name, enable_logging), new OuterT, new InnerT, name) {}
 };
 
 /////////////////////////////////
