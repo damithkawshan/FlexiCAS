@@ -84,7 +84,7 @@ using MetadataSBCMESI = MetadataSBC<AW, IW, TOfst, MetadataMESIDirectory<AW, IW,
  * IS_DYNAMIC: true for DSBC, false for SSBC
  * EF: empty first
  */
-template<int IW, int NW, int SATURATION_THRESHOLD = NW, bool IS_DYNAMIC = true, bool EF = true, int SAT_MAX = 15>
+template<int IW, int NW, int SATURATION_THRESHOLD = 2*NW-1, bool IS_DYNAMIC = true, bool EF = true, int SAT_MAX = 2*NW-1>
 class ReplaceSBC : public ReplaceFuncBase<EF>
 {
   typedef ReplaceFuncBase<EF> RPT;
@@ -101,8 +101,11 @@ protected:
   std::vector<uint32_t> saturation_counter;  // Current occupancy per set
   std::vector<bool> is_saturated;            // Quick saturation check
   
-  // Static SBC: Fixed partner mapping (XOR with middle bit)
+  // Static SBC: Fixed partner mapping (XOR with MSB)
   std::vector<uint32_t> partner_set;
+  
+  // Second search bit: indicates if secondary search should be performed for this set
+  std::vector<bool> second_search_bit;
   
   // Dynamic SBC: Track global saturation for DSS
   std::vector<std::pair<uint32_t, uint32_t>> saturation_index; // (saturation, set_id)
@@ -144,6 +147,7 @@ public:
                  saturation_counter(nset, 0),
                  is_saturated(nset, false),
                  partner_set(nset),
+                 second_search_bit(nset, false),
                  saturation_index(nset)
   {
     // Initialize used_map for LRU tracking
@@ -152,10 +156,10 @@ public:
       for(uint32_t i=0; i<NW; i++) s[i] = i;
     }
     
-    // Initialize static partner mapping (XOR with middle bit pattern)
-    // This distributes partners across the cache
+    // Initialize static partner mapping (XOR with MSB of set index)
+    // This ensures distant sets are paired, avoiding neighbors with similar saturation
     if constexpr (!IS_DYNAMIC) {
-      uint32_t xor_mask = 1ul << (IW / 2); // XOR with middle bit
+      uint32_t xor_mask = 1ul << (IW - 1); // XOR with MSB
       for(uint32_t s = 0; s < nset; s++) {
         partner_set[s] = s ^ xor_mask;
         //print partner set for 10,5,14 and 2
@@ -190,6 +194,30 @@ public:
    */
   bool needs_displacement(uint32_t s) const {
     return check_saturated(s) && (free_num[s] == 0);
+  }
+  
+  /**
+   * Get partner set for a given set (for SSBC)
+   */
+  uint32_t get_partner_set(uint32_t s) const {
+    if constexpr (!IS_DYNAMIC) {
+      return partner_set[s];
+    }
+    return s; // Dynamic mode doesn't use fixed partners
+  }
+  
+  /**
+   * Check if second search should be performed for this set
+   */
+  bool should_second_search(uint32_t s) const {
+    return second_search_bit[s];
+  }
+  
+  /**
+   * Set second search bit when displacement occurs
+   */
+  void set_second_search_bit(uint32_t s, bool value) {
+    second_search_bit[s] = value;
   }
   
   /**
@@ -477,11 +505,21 @@ protected:
   uint64_t successful_displacements = 0;
   uint64_t displacement_prevented_misses = 0;
   
+  // Per-set statistics
+  static constexpr uint32_t nset = 1ul << IW;
+  std::vector<uint64_t> set_accesses;
+  std::vector<uint64_t> set_hits;
+  std::vector<uint64_t> set_secondary_hits;
+  std::vector<uint64_t> set_misses;
+  std::vector<uint64_t> set_evictions;
+  
   // SBC logger
   SBCLogger* sbc_logger = nullptr;
 
 public:
-  CacheSBC(std::string name, bool enable_logging = false) : CacheT(name, enable_logging) {
+  CacheSBC(std::string name, bool enable_logging = false) : CacheT(name, enable_logging),
+    set_accesses(nset, 0), set_hits(nset, 0), set_secondary_hits(nset, 0),
+    set_misses(nset, 0), set_evictions(nset, 0) {
     if(enable_logging) {
       // Calculate cache size in KB: (2^IW sets) * NW ways * 64 bytes per line / 1024
       uint32_t cache_size_kb = (1ul << IW) * NW * 64 / 1024;
@@ -535,7 +573,7 @@ public:
       bool secondary_search = (dest_set != *s);
       uint32_t dest_saturation = replacer[0].get_saturation(dest_set);
       
-      if(dest_set != *s && dest_saturation < 8) {
+      if(dest_set != *s && dest_saturation < NW) {
         // Displacement is possible
         successful_displacements++;
         
@@ -585,6 +623,10 @@ public:
             dest_meta->mark_displaced(*s);
           }
           
+          // Update second search bits for both source and destination sets
+          replacer[0].set_second_search_bit(*s, true);
+          replacer[0].set_second_search_bit(dest_set, true);
+          
           // Log displacement
           if(sbc_logger) {
             std::string details = "DSBC: dest_sat=" + std::to_string(dest_saturation) +
@@ -623,6 +665,7 @@ public:
     // Check if we're evicting a valid line
     auto evict_meta = static_cast<MT*>(arrays[*ai]->get_meta(*s, *w));
     if(evict_meta->is_valid()) {
+      set_evictions[*s]++;
       uint64_t evict_addr = evict_meta->addr(*s);
       bool was_displaced = false;
       uint32_t home_set = *s;
@@ -631,6 +674,8 @@ public:
         was_displaced = evict_meta->is_displaced();
         if(was_displaced) {
           home_set = evict_meta->get_home_set();
+          // Clear second search bit for home set since displaced line is being evicted
+          replacer[0].set_second_search_bit(home_set, false);
         }
       }
       
@@ -650,15 +695,47 @@ public:
   }
   
   /**
-   * Override hit to add logging
+   * Override hit to add logging and implement secondary search
    */
   virtual bool hit(uint64_t addr, uint32_t *ai, uint32_t *s, uint32_t *w,
                    uint16_t prio, bool check_and_set) override {
-    bool result = CacheT::hit(addr, ai, s, w, prio, check_and_set);
+    // First search: native set (d=0)
+    *ai = 0;
+    *s = CacheT::indexer.index(addr, *ai);
+    uint32_t native_set = *s;
+    
+    bool result = false;
+    bool secondary_hit = false;
+    
+    // Search native set
+    if(EnMT && check_and_set) this->set_mt_state(*ai, *s, prio);
+    if(arrays[*ai]->hit(addr, *s, w)) {
+      result = true;
+    } else {
+      if(EnMT && check_and_set) this->reset_mt_state(*ai, *s, prio);
+      
+      // Second search: check partner set if second_search_bit is set (d=1)
+      if(replacer[0].should_second_search(native_set)) {
+        uint32_t partner_set = replacer[0].get_partner_set(native_set);
+        *s = partner_set;
+        
+        if(EnMT && check_and_set) this->set_mt_state(*ai, *s, prio);
+        if(arrays[*ai]->hit(addr, *s, w)) {
+          result = true;
+          secondary_hit = true;
+        }
+        if(EnMT && check_and_set) this->reset_mt_state(*ai, *s, prio);
+      }
+    }
     
     // Hit in set *s: decrement saturation (saturating arithmetic)
     if(result) {
       replacer[0].update_saturation(*s, -1);
+      set_accesses[native_set]++;
+      set_hits[*s]++;
+      if(secondary_hit) {
+        set_secondary_hits[*s]++;
+      }
     }
 
     if(result && sbc_logger) {
@@ -675,6 +752,7 @@ public:
       }
       
       std::string details = "State=" + meta->to_string();
+      if(secondary_hit) details += " [SecondaryHit]";
       sbc_logger->log_access(addr, *s, *w, saturation, is_displaced, home_set, true, details);
     }
     
