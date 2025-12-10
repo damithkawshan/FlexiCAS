@@ -6,11 +6,15 @@
 #include <limits>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <mutex>
+#include <string>
 #include "cache/cache.hpp"
 #include "cache/metadata.hpp"
 #include "cache/replace.hpp"
 #include "cache/index.hpp"
+
+#define SSBC_CUSTOM_ADDR 0x00000000925f0e00ULL
 
 /**
  * Set Balancing Cache (SBC) Implementation
@@ -336,7 +340,20 @@ private:
   std::ofstream log_file;
   std::mutex log_mutex;
   bool enabled;
+  std::ofstream set_stats_log;
+  bool set_stats_logging_enabled = true;
   uint64_t event_counter = 0;
+  struct SetStatsEntry {
+    uint64_t accesses = 0;
+    uint64_t secondary_hits = 0;
+    uint64_t hits = 0;
+    uint64_t misses = 0;
+    uint64_t evictions = 0;
+    uint32_t saturation = 0;
+    std::string details;
+  };
+  std::map<uint32_t, SetStatsEntry> set_stats_entries;
+  static constexpr const char *set_stats_filename = "log_set_stats.csv";
 
 public:
   SBCLogger(const std::string& filename = "log_sbc.log", bool enable = true) 
@@ -345,8 +362,8 @@ public:
       log_file.open(filename, std::ios::out | std::ios::trunc);
       if(log_file.is_open()) {
         // Write header
-        log_file << "# SBC Cache Event Log\n";
-        log_file << "# Format: EventID,Timestamp,Event,Address,Set,Way,Saturation,IsDisplaced,"
+        // log_file << "# SBC Cache Event Log\n";
+        log_file << "EventID,Timestamp,Event,Address,Set,Way,Saturation,IsDisplaced,"
                  << "HomeSet,DestSet,SecondarySearch,DisplacementAttempt,Success,Details\n";
         log_file << std::hex << std::setfill('0');
       } else {
@@ -436,6 +453,83 @@ public:
              << "0,0,"
              << (after_displacement ? "After displacement" : "Normal allocation")
              << (details.empty() ? "" : "; ") << details << "\n";
+  }
+
+  //log stats per set #accesses, #secondary hits, #hits, #misses, #evictions, #saturation,
+  void log_stats(uint32_t set, uint64_t accesses, uint64_t secondary_hits,
+                 uint64_t hits, uint64_t misses, uint64_t evictions, uint32_t saturation,
+                 const std::string& details = "") {
+    if(!set_stats_logging_enabled) return;
+
+    std::lock_guard<std::mutex> lock(log_mutex);
+
+    if(!set_stats_logging_enabled) return;
+
+    if(!set_stats_log.is_open()) {
+      set_stats_log.open("log_set_stats.csv", std::ios::out | std::ios::trunc);
+      if(set_stats_log.is_open()) {
+        set_stats_log << "Set,Accesses,SecondaryHits,Hits,Misses,Evictions,Saturation,Details\n";
+      } else {
+        set_stats_logging_enabled = false;
+        std::cerr << "Warning: Could not open SBC set stats log file: log_set_stats.csv" << std::endl;
+        return;
+      }
+    }
+
+    set_stats_log << std::dec << set << ","
+                  << accesses << ","
+                  << secondary_hits << ","
+                  << hits << ","
+                  << misses << ","
+                  << evictions << ","
+                  << saturation << ","
+                  << details << "\n";
+  }
+
+  void intelli_log_stat(uint32_t set, uint64_t accesses, uint64_t secondary_hits,
+                        uint64_t hits, uint64_t misses, uint64_t evictions, uint32_t saturation,
+                        const std::string& details = "") {
+    if(!set_stats_logging_enabled) return;
+
+    std::lock_guard<std::mutex> lock(log_mutex);
+
+    if(!set_stats_logging_enabled) return;
+
+    auto &entry = set_stats_entries[set];
+    entry.accesses = accesses;
+    entry.secondary_hits = secondary_hits;
+    entry.hits = hits;
+    entry.misses = misses;
+    entry.evictions = evictions;
+    entry.saturation = saturation;
+    entry.details = details;
+
+    if(set_stats_log.is_open()) {
+      set_stats_log.close();
+    }
+
+    set_stats_log.open(set_stats_filename, std::ios::out | std::ios::trunc);
+    if(!set_stats_log.is_open()) {
+      set_stats_logging_enabled = false;
+      std::cerr << "Warning: Could not open SBC set stats log file: "
+                << set_stats_filename << std::endl;
+      return;
+    }
+
+    set_stats_log << "Set,Accesses,Hits,Misses,Evictions,SecondaryHits,Saturation,Details\n";
+    set_stats_log << std::dec;
+    for(const auto &[set_id, stats] : set_stats_entries) {
+      set_stats_log << set_id << ","
+                    << stats.accesses << ","
+                    << stats.hits << ","
+                    << stats.misses << ","
+                    << stats.evictions << ","
+                    << stats.secondary_hits << ","
+                    << stats.saturation << ","
+                    << stats.details << "\n";
+    }
+
+    set_stats_log.flush();
   }
 
   void log_eviction(uint64_t addr, uint32_t set, uint32_t way, uint32_t saturation,
@@ -599,15 +693,31 @@ public:
           }
           
           // Log eviction of victim
-          if(sbc_logger) {
-            sbc_logger->log_eviction(victim_addr, *s, *w, src_saturation,
-                                    victim_was_displaced, victim_home_set,
-                                    "Victim for displacement");
-          }
+          // if(sbc_logger) {
+          //   sbc_logger->log_eviction(victim_addr, *s, *w, src_saturation,
+          //                           victim_was_displaced, victim_home_set,
+          //                           "Victim for displacement");
+          // }
           
           // Allocate in destination set
           replacer[0].replace(dest_set, &dest_way);
+          
           auto dest_meta = static_cast<MT*>(arrays[*ai]->get_meta(dest_set, dest_way));
+          
+          // Check if we're evicting from destination set
+          if(dest_meta->is_valid()) {
+            set_evictions[dest_set]++;
+            uint64_t dest_evict_addr = dest_meta->addr(dest_set);
+            bool dest_was_displaced = false;
+            uint32_t dest_home_set = dest_set;
+            
+            if constexpr (requires { dest_meta->is_displaced(); }) {
+              dest_was_displaced = dest_meta->is_displaced();
+              if(dest_was_displaced) {
+                dest_home_set = dest_meta->get_home_set();
+              }
+            }  
+          }
           
           // Move the victim line to destination
           if constexpr (!C_VOID<DT>) {
@@ -628,27 +738,30 @@ public:
           replacer[0].set_second_search_bit(dest_set, true);
           
           // Log displacement
+          /* Crucial logs do not delete
           if(sbc_logger) {
-            std::string details = "DSBC: dest_sat=" + std::to_string(dest_saturation) +
-                                " src_sat=" + std::to_string(src_saturation);
+            std::string details = "DSBC: dest[" + std::to_string(dest_set) + "]_sat=" + std::to_string(dest_saturation) +
+                                " src[" + std::to_string(*s) + "]_sat=" + std::to_string(src_saturation);
             sbc_logger->log_displacement(victim_addr, *s, *w, src_saturation,
                                         dest_set, dest_way, dest_saturation,
                                         secondary_search, true, details);
           }
+          */
           
           displacement_prevented_misses++;
         }
         
         // Log allocation of new line after displacement
-        if(sbc_logger) {
-          sbc_logger->log_allocation(addr, *s, *w, src_saturation, true,
-                                    "After successful displacement");
-        }
+        // if(sbc_logger) {
+        //   sbc_logger->log_allocation(addr, *s, *w, src_saturation, true,
+        //                             "After successful displacement");
+        // }
         
         // Now allocate the new line in the original set
         return true;
       } else {
         // Displacement not possible - log failed attempt
+        /* Crucial logs do not delete
         if(sbc_logger) {
           std::string reason = (dest_set == *s) ? "No alternative set found" : 
                               "Destination set full";
@@ -656,6 +769,7 @@ public:
                                       dest_set, 0, replacer[0].get_saturation(dest_set),
                                       secondary_search, false, reason);
         }
+                                      */
       }
     }
     
@@ -679,17 +793,27 @@ public:
         }
       }
       
-      if(sbc_logger) {
-        sbc_logger->log_eviction(evict_addr, *s, *w, src_saturation,
-                                was_displaced, home_set, "Normal eviction");
-      }
+      // if(sbc_logger) {
+      //   sbc_logger->log_allocation(evict_addr, *s, *w, src_saturation, false,
+      //                             "EVICTION from SAME set " + std::to_string(*s) +
+      //                             (was_displaced ? " (was displaced from set " + std::to_string(home_set) + ")" : " (native line)") +
+      //                             " - Normal replacement without displacement");
+        
+      //   // Print set statistics after eviction
+      //   sbc_logger->log_allocation(evict_addr, *s, 0, replacer[0].get_saturation(*s), false,
+      //                             "Set " + std::to_string(*s) + " Stats - Accesses: " + std::to_string(set_accesses[*s]) +
+      //                             ", Hits: " + std::to_string(set_hits[*s]) +
+      //                             ", Secondary Hits: " + std::to_string(set_secondary_hits[*s]) +
+      //                             ", Misses: " + std::to_string(set_misses[*s]) +
+      //                             ", Evictions: " + std::to_string(set_evictions[*s]));
+      // }
     }
     
     // Log normal allocation
-    if(sbc_logger) {
-      sbc_logger->log_allocation(addr, *s, *w, src_saturation, false,
-                                "Normal allocation");
-    }
+    // if(sbc_logger) {
+    //   sbc_logger->log_allocation(addr, *s, *w, src_saturation, false,
+    //                             "Normal allocation");
+    // }
     
     return true;
   }
@@ -711,6 +835,12 @@ public:
     if(EnMT && check_and_set) this->set_mt_state(*ai, *s, prio);
     if(arrays[*ai]->hit(addr, *s, w)) {
       result = true;
+      /* Damith Comment
+      if (sbc_logger) {
+          sbc_logger->log_allocation(addr, native_set, 0, replacer[0].get_saturation(native_set), false,
+                                    "CUSTOM_ADDR: PRIMARY HIT in native set " + std::to_string(native_set));
+      }
+      */
     } else {
       if(EnMT && check_and_set) this->reset_mt_state(*ai, *s, prio);
       
@@ -718,6 +848,14 @@ public:
       if(replacer[0].should_second_search(native_set)) {
         uint32_t partner_set = replacer[0].get_partner_set(native_set);
         *s = partner_set;
+        
+        // if(sbc_logger && addr == SSBC_CUSTOM_ADDR) {
+        /* Damith Comment
+        if (sbc_logger) {
+          sbc_logger->log_allocation(addr, native_set, 0, replacer[0].get_saturation(native_set), false,
+                                    "CUSTOM_ADDR: Performing secondary search from set " + std::to_string(native_set) + " to partner set " + std::to_string(partner_set));
+        }
+        */
         
         if(EnMT && check_and_set) this->set_mt_state(*ai, *s, prio);
         if(arrays[*ai]->hit(addr, *s, w)) {
@@ -730,11 +868,11 @@ public:
     
     // Hit in set *s: decrement saturation (saturating arithmetic)
     if(result) {
-      replacer[0].update_saturation(*s, -1);
+      replacer[0].update_saturation(native_set, -1); // Damith : do we need to consider native_set here?
       set_accesses[native_set]++;
-      set_hits[*s]++;
+      set_hits[native_set]++;
       if(secondary_hit) {
-        set_secondary_hits[*s]++;
+        set_secondary_hits[native_set]++;
       }
     }
 
@@ -752,8 +890,28 @@ public:
       }
       
       std::string details = "State=" + meta->to_string();
-      if(secondary_hit) details += " [SecondaryHit]";
-      sbc_logger->log_access(addr, *s, *w, saturation, is_displaced, home_set, true, details);
+      if(secondary_hit) details += " Secondary : DSBC: dest[" + std::to_string(*s) + "]_sat=" + std::to_string(saturation) +
+                                " src[" + std::to_string(native_set) + "]_sat=" + 
+                                std::to_string(replacer[0].get_saturation(native_set));
+      //sbc_logger->log_access(addr, native_set, *w, saturation, is_displaced, home_set, true, details);
+    }
+    else if(!result && sbc_logger) {
+      set_accesses[native_set]++;
+      set_misses[native_set]++;
+      //sbc_logger->log_access(addr, native_set, 0, replacer[0].get_saturation(native_set),
+       //                      false, native_set, false, "both misses MISS");
+    }
+
+    
+
+    if(sbc_logger) {
+      // Print set statistics after access
+      sbc_logger->log_stats(native_set, set_accesses[native_set],
+                            set_secondary_hits[native_set],
+                            set_hits[native_set],
+                            set_misses[native_set],
+                            set_evictions[native_set],
+                            replacer[0].get_saturation(native_set));
     }
     
     return result;
