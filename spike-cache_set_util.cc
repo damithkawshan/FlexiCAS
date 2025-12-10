@@ -19,6 +19,7 @@
 #include <iostream>
 #include <iomanip>
 #include <fstream>
+#include <string>
 #include "flexicas/cache_config.h"
 
 // // 32K 8W, both I and D
@@ -253,13 +254,14 @@ namespace {
     }
   }
 
-  void print_cache_statistics() {
+  void print_cache_statistics(const std::string& context = "") {
     std::cout << "\n========================================" << std::endl;
     std::cout << "=== EMBEDDED CACHE PERFORMANCE (MESI Inclusive) ===" << std::endl;
     std::cout << "========================================" << std::endl;
     
     // Print Cache Configuration
     std::cout << "\n--- Cache Configuration ---" << std::endl;
+    std::cout << cache_type_suffix() << std::endl;
     std::cout << "Number of Cores:     " << NC << std::endl;
     std::cout << "L1 Data Cache:       " << (1 << L1IW) * CACHE_LINE_SIZE * L1WN / 1024 << "KB, " << (L1WN) << "-way set associative" << std::endl;
     std::cout << "\nL1 Instruction Cache " << (1 << L1IW) * CACHE_LINE_SIZE * L1WN / 1024 << "KB, " << (L1WN) << "-way set associative" << std::endl;
@@ -320,15 +322,15 @@ namespace {
       uint32_t l2_size_kb = (1u << L2IW) * CACHE_LINE_SIZE * L2WN / 1024u;
 
       if (l1d_util_monitor) {
-        l1d_util_monitor->export_to_csv("l1d_set_utilization_" + std::to_string(l1_size_kb) + "KB.csv");
+        l1d_util_monitor->export_to_csv( context + "l1d_set_utilization_" + std::string(cache_type_suffix()) +"_"+ std::to_string(l1_size_kb) + "KB.csv");
         // l1d_util_monitor->export_eviction_history_to_csv("l1d_eviction_history_" + std::to_string(l1_size_kb) + "KB.csv");
       }
       if (l1i_util_monitor) {
-        l1i_util_monitor->export_to_csv("l1i_set_utilization_" + std::to_string(l1_size_kb) + "KB.csv");
+        l1i_util_monitor->export_to_csv( context + "l1i_set_utilization_" + std::string(cache_type_suffix()) +"_"+ std::to_string(l1_size_kb) + "KB.csv");
         // l1i_util_monitor->export_eviction_history_to_csv("l1i_eviction_history_" + std::to_string(l1_size_kb) + "KB.csv");
       }
       if (l2_util_monitor) {
-        l2_util_monitor->export_to_csv("l2_set_utilization_" + std::to_string(l2_size_kb) + "KB.csv");
+        l2_util_monitor->export_to_csv( context + "l2_set_utilization_" + std::string(cache_type_suffix()) +"_"+ std::to_string(l2_size_kb) + "KB.csv");
         // l2_util_monitor->export_eviction_history_to_csv("l2_eviction_history_" + std::to_string(l2_size_kb) + "KB.csv");
       }
     }
@@ -377,10 +379,19 @@ namespace flexicas {
     core_data = get_l1_core_interface(l1d);
     auto l1i = cache_gen_l1<L1IW, L1WN, void, MetadataBroadcastBase, ReplaceLRU, MESIPolicy, policy_l1i, true, void, true>(NC, "l1i");
     core_inst = get_l1_core_interface(l1i);
-    // Use Dynamic SBC with logging disabled by default (change last parameter to true to enable)
-    auto l2 = cache_gen_dsbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-dsbc", false); std::cout << "Using Dynamic SBC for L2 Cache" << std::endl;
-    // auto l2 = cache_gen_ssbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-ssbc", false); std::cout << "Using Static SBC for L2 Cache" << std::endl;
-    // auto l2 = cache_gen_inc<L2IW, L2WN, void, MetadataDirectoryBase, ReplaceLRU, MESIPolicy, policy_l2, false, void, true>(NC, "l2");  std::cout << "Using Inclusive LRU for L2 Cache" << std::endl;
+
+    #if CACHE_TYPE == CACHE_TYPE_BL
+      auto l2 = cache_gen_inc<L2IW, L2WN, void, MetadataDirectoryBase, ReplaceLRU, MESIPolicy, policy_l2, false, void, true>(NC, "l2");
+      std::cout << "Using Baseline (LRU) for L2 Cache" << std::endl;
+    #elif CACHE_TYPE == CACHE_TYPE_DB
+      auto l2 = cache_gen_dsbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-dsbc", true);
+      std::cout << "Using Dynamic SBC for L2 Cache" << std::endl;
+    #elif CACHE_TYPE == CACHE_TYPE_SB
+      auto l2 = cache_gen_ssbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-ssbc", true);
+      std::cout << "Using Static SBC for L2 Cache" << std::endl;
+    #else
+      #error "Unsupported CACHE_TYPE specified"
+    #endif
     auto mem = new SimpleMemoryModel<void,void,true>("mem");
     tracer = new SimpleTracer(true);
     if(prefix) tracer->set_prefix(std::string(prefix));
@@ -429,19 +440,27 @@ namespace flexicas {
     //start tracer
     // tracer->start();
 
-    // Start monitoring all levels
-    // l1d_perf_monitor->start();
-    // l1i_perf_monitor->start();
-    // l2_perf_monitor->start();
-    // memory_perf_monitor->start();
-    
-    // // Start utilization monitoring
-    // l1d_util_monitor->start();
-    // l1i_util_monitor->start();
-    // l2_util_monitor->start();
+    std::cout << "FlexiCAS initialization completed." << std::endl;
+    std::cout << "Starting performance and utilization monitors..." << std::endl;
+    l1d_perf_monitor->reset();
+    l1i_perf_monitor->reset();
+    l2_perf_monitor->reset();
+    memory_perf_monitor->reset();
 
-    // Start reuse count monitoring
-    // l2_reuse_monitor->start();
+    l1d_util_monitor->reset();
+    l1i_util_monitor->reset();
+    l2_util_monitor->reset();
+
+    // l2_reuse_monitor->reset();
+    l1d_perf_monitor->start();
+    l1i_perf_monitor->start();
+    l2_perf_monitor->start();
+    memory_perf_monitor->start();
+
+    l1d_util_monitor->start();
+    l1i_util_monitor->start();
+    l2_util_monitor->start();
+
 
 #ifdef ENABLE_FLEXICAS_THREAD
     // set up the cache server
@@ -451,17 +470,29 @@ namespace flexicas {
   }
 
   void exit() {
+    std::cout << "Stopping FlexiCAS..." << std::endl;
     exit_flag = true;
     l1d_perf_monitor->stop();
     l1i_perf_monitor->stop();
     l2_perf_monitor->stop();
     memory_perf_monitor->stop();
+
+    l1d_util_monitor->stop();
+    l1i_util_monitor->stop();
+    l2_util_monitor->stop();
+
     // l2_reuse_monitor->stop();
-    tracer->stop();
-    
-    // Print statistics before exiting
-    cache_sync();
-    // print_cache_statistics();
+    // tracer->stop();
+    std::cout << "FlexiCAS exiting..." << std::endl;
+    print_cache_statistics("terminated");
+    // l1d_perf_monitor->reset();
+    // l1i_perf_monitor->reset();
+    // l2_perf_monitor->reset();
+    // memory_perf_monitor->reset();
+
+    // l1d_util_monitor->reset();
+    // l1i_util_monitor->reset();
+    // l2_util_monitor->reset();
   }
 
   void read(uint64_t addr, int core, bool ic) {
@@ -510,6 +541,7 @@ namespace flexicas {
 
   void csr_write(uint64_t cmd, int core, tlb_translate_func translator) {
     if((cmd & (~FLEXICAS_PFC_ADDR)) == FLEXICAS_PFC_CMD && (cmd & FLEXICAS_PFC_CMD_MASK) == FLEXICAS_PFC_START) {
+      std::cout << "FLEXICAS_PFC_START received. Starting monitors..." <<  std::endl;
       l1d_perf_monitor->reset();
       l1i_perf_monitor->reset();
       l2_perf_monitor->reset();
@@ -535,6 +567,7 @@ namespace flexicas {
     }
 
     if((cmd & (~FLEXICAS_PFC_ADDR)) == FLEXICAS_PFC_CMD && (cmd & FLEXICAS_PFC_CMD_MASK) == FLEXICAS_PFC_STOP) {
+      std::cout << "FLEXICAS_PFC_STOP received. Stopping monitors and printing statistics..." <<  std::endl;
       l1d_perf_monitor->stop();
       l1i_perf_monitor->stop();
       l2_perf_monitor->stop();
