@@ -9,6 +9,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <bitset>
 #include "cache/cache.hpp"
 #include "cache/metadata.hpp"
 #include "cache/replace.hpp"
@@ -160,15 +161,15 @@ public:
       for(uint32_t i=0; i<NW; i++) s[i] = i;
     }
     
-    // Initialize static partner mapping (XOR with MSB of set index)
-    // This ensures distant sets are paired, avoiding neighbors with similar saturation
+    // Initialize static partner mapping (complement MSB)
+    // This distributes partners across the cache
     if constexpr (!IS_DYNAMIC) {
-      uint32_t xor_mask = 1ul << (IW - 1); // XOR with MSB
+      uint32_t msb_mask = 1ul << (IW - 1); // Complement MSB
       for(uint32_t s = 0; s < nset; s++) {
-        partner_set[s] = s ^ xor_mask;
+        partner_set[s] = s ^ msb_mask;
         //print partner set for 10,5,14 and 2
         if (s == 10 || s == 5 || s == 14 || s == 2) {
-          std::cout << "Set " << s << " partner: " << partner_set[s] << std::endl;
+            std::cout << "Set " << std::bitset<IW>(s) << " partner: " << std::bitset<IW>(partner_set[s]) << std::endl;
         }
       }
     }
