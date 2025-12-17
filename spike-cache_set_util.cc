@@ -5,6 +5,7 @@
 #include "flexicas-pfc.h"
 #include "cache/mesi.hpp"
 #include "util/set_utilization_monitor.hpp"
+#include "util/sbc_utilization_monitor.hpp"
 #include "util/reuse_count_monitor.hpp"
 #include "cache/sbc.hpp"
 #include "cache/coherence.hpp"
@@ -21,15 +22,6 @@
 #include <fstream>
 #include <string>
 #include "flexicas/cache_config.h"
-
-// // 32K 8W, both I and D
-// #define L1IW 6
-// #define L1WN 8
-
-// // 256K, 4W, exclusive 
-// #define L2IW 10
-// #define L2WN 4
-
 
 // Embedded microprocessor configuration (similar to ARM Cortex-M7/SiFive E76)
 // Small caches optimized for embedded systems with MESI inclusive hierarchy
@@ -70,6 +62,7 @@
 
 namespace {
   static std::vector<CoreInterfaceBase *> core_data, core_inst;
+  static std::vector<CoherentCacheBase *> l2_caches;  // L2 cache objects for flushing
   static std::vector<uint64_t> core_cycle; // record the cycle time in each core
   static uint64_t wall_clock;              // a wall clock shared by all cores
   static MonitorBase *tracer;
@@ -84,6 +77,9 @@ namespace {
   static SetUtilizationMonitor *l1d_util_monitor;
   static SetUtilizationMonitor *l1i_util_monitor;
   static SetUtilizationMonitor *l2_util_monitor;
+  
+  // SBC-specific utilization monitor for L2 (used when SSBC/DSBC is enabled)
+  static SBCUtilizationMonitor *l2_sbc_util_monitor;
 
   // Reuse count monitor for L2 cache
   // static ReuseCountMonitor *l2_reuse_monitor;
@@ -151,6 +147,24 @@ namespace {
 
   inline void flush_icache_detailed(int core) {
     core_inst[core]->flush_cache(nullptr);
+  }
+
+  inline void flush_all_caches_detailed() {
+    // Flush L1 data and instruction caches for all cores
+    for (int i = 0; i < NC; i++) {
+      core_data[i]->flush_cache(nullptr);
+      core_inst[i]->flush_cache(nullptr);
+    }
+    // Flush L2 caches directly
+    for (int i = 0; i < NC; i++) {
+      if (l2_caches[i] && l2_caches[i]->inner) {
+        // Use the inner interface to flush all L2 cache lines
+        auto inner = dynamic_cast<CoreInterfaceBase*>(l2_caches[i]->inner);
+        if (inner) {
+          inner->flush_cache(nullptr);
+        }
+      }
+    }
   }
 
   void cache_server() {
@@ -315,6 +329,13 @@ namespace {
       l2_util_monitor->print_statistics("L2 Cache");
     }
     
+    // Print SBC-specific utilization statistics for L2 (when using SSBC/DSBC)
+    #if CACHE_TYPE == CACHE_TYPE_SB || CACHE_TYPE == CACHE_TYPE_DB
+    if (l2_sbc_util_monitor) {
+      l2_sbc_util_monitor->print_statistics("L2 Cache (SBC-Aware)");
+    }
+    #endif
+    
     // Export detailed set utilization to CSV files
     if (l1d_util_monitor || l1i_util_monitor || l2_util_monitor) {
       // Compute cache sizes in KB for filename suffixes
@@ -333,6 +354,13 @@ namespace {
         l2_util_monitor->export_to_csv( context + "l2_set_utilization_" + std::string(cache_type_suffix()) +"_"+ std::to_string(l2_size_kb) + "KB.csv");
         // l2_util_monitor->export_eviction_history_to_csv("l2_eviction_history_" + std::to_string(l2_size_kb) + "KB.csv");
       }
+      
+      // Export SBC-specific statistics
+      #if CACHE_TYPE == CACHE_TYPE_SB || CACHE_TYPE == CACHE_TYPE_DB
+      if (l2_sbc_util_monitor) {
+        l2_sbc_util_monitor->export_to_csv(context + "l2_sbc_utilization_" + std::string(cache_type_suffix()) + "_" + std::to_string(l2_size_kb) + "KB.csv");
+      }
+      #endif
     }
     
     std::cout << "\n========================================" << std::endl;
@@ -364,7 +392,7 @@ namespace flexicas {
   }
 
   void init(int ncore, const char *prefix) {
-    std::cout << "================ 27/11/2025 6.14PM =============" << std::endl;
+    std::cout << "================ 17/12/2025 14.12PM =============" << std::endl;
     std::cout << "Initializing FlexiCAS Embedded Cache Model with " << ncore << " cores..." << std::endl;
     std::cout << "\nL1 Data Cache:       " << (1 << L1IW) * CACHE_LINE_SIZE * L1WN / 1024 << "KB, " << (L1WN) << "-way set associative" << std::endl;
     std::cout << "L1 Instruction Cache: " << (1 << L1IW) * CACHE_LINE_SIZE * L1WN / 1024 << "KB, " << (L1WN) << "-way set associative" << std::endl;
@@ -381,17 +409,18 @@ namespace flexicas {
     core_inst = get_l1_core_interface(l1i);
 
     #if CACHE_TYPE == CACHE_TYPE_BL
-      auto l2 = cache_gen_inc<L2IW, L2WN, void, MetadataDirectoryBase, ReplaceLRU, MESIPolicy, policy_l2, false, void, true>(NC, "l2");
+      l2_caches = cache_gen_inc<L2IW, L2WN, void, MetadataDirectoryBase, ReplaceLRU, MESIPolicy, policy_l2, false, void, true>(NC, "l2");
       std::cout << "Using Baseline (LRU) for L2 Cache" << std::endl;
     #elif CACHE_TYPE == CACHE_TYPE_DB
-      auto l2 = cache_gen_dsbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-dsbc", true);
+      l2_caches = cache_gen_dsbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-dsbc", true);
       std::cout << "Using Dynamic SBC for L2 Cache" << std::endl;
     #elif CACHE_TYPE == CACHE_TYPE_SB
-      auto l2 = cache_gen_ssbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-ssbc", true);
+      l2_caches = cache_gen_ssbc<L2IW, L2WN, void, MetadataDirectoryBase, MESIPolicy, policy_l2, false, void, true>(NC, "l2-ssbc", true);
       std::cout << "Using Static SBC for L2 Cache" << std::endl;
     #else
       #error "Unsupported CACHE_TYPE specified"
     #endif
+    auto& l2 = l2_caches;  // Keep compatibility with existing code
     auto mem = new SimpleMemoryModel<void,void,true>("mem");
     tracer = new SimpleTracer(true);
     if(prefix) tracer->set_prefix(std::string(prefix));
@@ -409,6 +438,14 @@ namespace flexicas {
     l1d_util_monitor = new SetUtilizationMonitor(1 << L1IW, L1WN);
     l1i_util_monitor = new SetUtilizationMonitor(1 << L1IW, L1WN);
     l2_util_monitor = new SetUtilizationMonitor(1 << L2IW, L2WN);
+    
+    // Create SBC-specific monitor for L2 when using SSBC/DSBC
+    #if CACHE_TYPE == CACHE_TYPE_SB || CACHE_TYPE == CACHE_TYPE_DB
+    l2_sbc_util_monitor = new SBCUtilizationMonitor(1 << L2IW, L2WN, L2IW);
+    std::cout << "SBC Utilization Monitor created for L2 Cache" << std::endl;
+    #else
+    l2_sbc_util_monitor = nullptr;
+    #endif
 
     for(int i=0; i<NC; i++) {
       l1i[i]->outer->connect(l2[i]->inner);
@@ -429,6 +466,11 @@ namespace flexicas {
       l1i[i]->attach_monitor(l1i_util_monitor);
       l1d[i]->attach_monitor(l1d_util_monitor);
       l2[i]->attach_monitor(l2_util_monitor);
+      
+      // Attach SBC-specific monitor to L2 when using SSBC/DSBC
+      #if CACHE_TYPE == CACHE_TYPE_SB || CACHE_TYPE == CACHE_TYPE_DB
+      l2[i]->attach_monitor(l2_sbc_util_monitor);
+      #endif
 
       // Attach reuse count monitor to L2 cache
       // l2[i]->attach_monitor(l2_reuse_monitor);
@@ -450,6 +492,10 @@ namespace flexicas {
     l1d_util_monitor->reset();
     l1i_util_monitor->reset();
     l2_util_monitor->reset();
+    
+    #if CACHE_TYPE == CACHE_TYPE_SB || CACHE_TYPE == CACHE_TYPE_DB
+    if (l2_sbc_util_monitor) l2_sbc_util_monitor->reset();
+    #endif
 
     // l2_reuse_monitor->reset();
     l1d_perf_monitor->start();
@@ -460,6 +506,10 @@ namespace flexicas {
     l1d_util_monitor->start();
     l1i_util_monitor->start();
     l2_util_monitor->start();
+    
+    #if CACHE_TYPE == CACHE_TYPE_SB || CACHE_TYPE == CACHE_TYPE_DB
+    if (l2_sbc_util_monitor) l2_sbc_util_monitor->start();
+    #endif
 
 
 #ifdef ENABLE_FLEXICAS_THREAD
@@ -480,6 +530,10 @@ namespace flexicas {
     l1d_util_monitor->stop();
     l1i_util_monitor->stop();
     l2_util_monitor->stop();
+    
+    #if CACHE_TYPE == CACHE_TYPE_SB || CACHE_TYPE == CACHE_TYPE_DB
+    if (l2_sbc_util_monitor) l2_sbc_util_monitor->stop();
+    #endif
 
     // l2_reuse_monitor->stop();
     // tracer->stop();
@@ -541,7 +595,15 @@ namespace flexicas {
 
   void csr_write(uint64_t cmd, int core, tlb_translate_func translator) {
     if((cmd & (~FLEXICAS_PFC_ADDR)) == FLEXICAS_PFC_CMD && (cmd & FLEXICAS_PFC_CMD_MASK) == FLEXICAS_PFC_START) {
-      std::cout << "FLEXICAS_PFC_START received. Starting monitors..." <<  std::endl;
+      std::cout << "FLEXICAS_PFC_START received. Flushing all caches (L1D, L1I, L2) and starting monitors..." <<  std::endl;
+      
+      // Flush all caches to ensure a clean state for accurate measurements
+      cache_sync(); // Ensure all pending transactions are processed
+      flush_all_caches_detailed();  // Flush L1 and L2 caches
+      cache_sync(); // Wait for all flush operations to complete
+      
+      std::cout << "All caches (L1D, L1I, L2) flushed. Resetting and starting monitors..." <<  std::endl;
+      
       l1d_perf_monitor->reset();
       l1i_perf_monitor->reset();
       l2_perf_monitor->reset();
@@ -550,6 +612,10 @@ namespace flexicas {
       l1d_util_monitor->reset();
       l1i_util_monitor->reset();
       l2_util_monitor->reset();
+      
+      #if CACHE_TYPE == CACHE_TYPE_SB || CACHE_TYPE == CACHE_TYPE_DB
+      if (l2_sbc_util_monitor) l2_sbc_util_monitor->reset();
+      #endif
 
       // l2_reuse_monitor->reset();
       l1d_perf_monitor->start();
@@ -560,6 +626,10 @@ namespace flexicas {
       l1d_util_monitor->start();
       l1i_util_monitor->start();
       l2_util_monitor->start();
+      
+      #if CACHE_TYPE == CACHE_TYPE_SB || CACHE_TYPE == CACHE_TYPE_DB
+      if (l2_sbc_util_monitor) l2_sbc_util_monitor->start();
+      #endif
 
       // l2_reuse_monitor->start();
       // tracer->start();
@@ -576,6 +646,10 @@ namespace flexicas {
       l1d_util_monitor->stop();
       l1i_util_monitor->stop();
       l2_util_monitor->stop();
+      
+      #if CACHE_TYPE == CACHE_TYPE_SB || CACHE_TYPE == CACHE_TYPE_DB
+      if (l2_sbc_util_monitor) l2_sbc_util_monitor->stop();
+      #endif
 
       // l2_reuse_monitor->stop();
       // tracer->stop();
@@ -588,6 +662,11 @@ namespace flexicas {
       l1d_util_monitor->reset();
       l1i_util_monitor->reset();
       l2_util_monitor->reset();
+      
+      #if CACHE_TYPE == CACHE_TYPE_SB || CACHE_TYPE == CACHE_TYPE_DB
+      if (l2_sbc_util_monitor) l2_sbc_util_monitor->reset();
+      #endif
+      
       return;
     }
 
