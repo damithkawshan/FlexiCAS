@@ -168,8 +168,8 @@ public:
       for(uint32_t s = 0; s < nset; s++) {
         partner_set[s] = s ^ msb_mask;
         //print partner set for 10,5,14 and 2
-        if (s == 10 || s == 5 || s == 14 || s == 2) {
-            std::cout << "Set " << std::bitset<IW>(s) << " partner: " << std::bitset<IW>(partner_set[s]) << std::endl;
+        if (true) {
+            std::cout << "Set [" << std::dec << s  << "] "<< std::bitset<IW>(s) << " partner: [" << std::dec << partner_set[s] << "] " << std::bitset<IW>(partner_set[s]) << std::endl;
         }
       }
     }
@@ -232,7 +232,7 @@ public:
     uint32_t dest = select_destination_set(source_set);
     
     // Only displace if destination has capacity
-    if(free_num[dest] > 0 || saturation_counter[dest] < saturation_counter[source_set]) {
+    if(free_num[dest] > 0 || saturation_counter[dest] < NW) {
       return dest;
     }
     
@@ -790,7 +790,7 @@ public:
         if(was_displaced) {
           home_set = evict_meta->get_home_set();
           // Clear second search bit for home set since displaced line is being evicted
-          replacer[0].set_second_search_bit(home_set, false);
+          // replacer[0].set_second_search_bit(home_set, false);
         }
       }
       
