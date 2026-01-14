@@ -6,3 +6,10 @@
 regression/*.log
 regression/*.out
 
+cache/README.md
+cache/SBC_ARCHITECTURE.txt
+cache/SBC_IMPLEMENTATION_SUMMARY.md
+cache/SBC_INDEX.md
+cache/SBC_QUICKREF.md
+cache/SBC_README.md
+examples/cache_monitor_demo.c

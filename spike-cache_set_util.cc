@@ -392,7 +392,7 @@ namespace flexicas {
   }
 
   void init(int ncore, const char *prefix) {
-    std::cout << "================ 17/12/2025 14.12PM =============" << std::endl;
+    std::cout << "================ 17/12/2025 17.44PM =============" << std::endl;
     std::cout << "Initializing FlexiCAS Embedded Cache Model with " << ncore << " cores..." << std::endl;
     std::cout << "\nL1 Data Cache:       " << (1 << L1IW) * CACHE_LINE_SIZE * L1WN / 1024 << "KB, " << (L1WN) << "-way set associative" << std::endl;
     std::cout << "L1 Instruction Cache: " << (1 << L1IW) * CACHE_LINE_SIZE * L1WN / 1024 << "KB, " << (L1WN) << "-way set associative" << std::endl;
