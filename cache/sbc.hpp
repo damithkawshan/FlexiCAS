@@ -15,7 +15,7 @@
 #include "cache/replace.hpp"
 #include "cache/index.hpp"
 
-#define SSBC_CUSTOM_ADDR 0x00000000925f0e00ULL
+#define SSBC_CUSTOM_ADDR 0x000000008041b800
 
 /**
  * Set Balancing Cache (SBC) Implementation
@@ -200,6 +200,10 @@ public:
   bool needs_displacement(uint32_t s) const {
     return check_saturated(s) && (free_num[s] == 0);
   }
+
+  bool get_free_line_available(uint32_t s) const {
+    return free_num[s] > 0;
+  }
   
   /**
    * Get partner set for a given set (for SSBC)
@@ -208,7 +212,9 @@ public:
     if constexpr (!IS_DYNAMIC) {
       return partner_set[s];
     }
-    return s; // Dynamic mode doesn't use fixed partners
+    else {
+      select_destination_set(s); // For DSBC, destination set varies
+    }
   }
   
   /**
@@ -229,14 +235,15 @@ public:
    * Get destination set for displacement
    */
   uint32_t get_displacement_destination(uint32_t source_set) {
-    uint32_t dest = select_destination_set(source_set);
+    return select_destination_set(source_set);
     
-    // Only displace if destination has capacity
-    if(free_num[dest] > 0 || saturation_counter[dest] < NW) {
-      return dest;
-    }
+    // // Only displace if destination has capacity
+    // if(free_num[dest] > 0 || saturation_counter[dest] < NW) {
+    //   return dest;
+    // }
     
-    return source_set; // No displacement possible
+    // return source_set; // No displacement possible
+
   }
   
   /**
@@ -705,6 +712,67 @@ public:
       sbc_logger = new SBCLogger(log_filename, true, SBCLogger::LOG_ALL);
     }
   }
+
+  // ================== Displacement Decision Functions ==================
+
+  /**
+   * Saturation-based displacement decision
+   * Decides to displace when the set is saturated and no free lines are available
+   */
+  bool displacement_decision_saturation_based(uint32_t s) const {
+    return replacer[0].needs_displacement(s);
+  }
+
+  /**
+   * Miss-rate-based displacement decision
+   * Decides to displace when no free lines and hit rate is below threshold
+   * @param s Set index
+   * @param hit_rate_threshold Minimum hit rate percentage (default 80.0)
+   */
+  bool displacement_decision_miss_rate_based(uint32_t s, double hit_rate_threshold = 80.0) const {
+    if(replacer[0].get_free_line_available(s)) {
+      return false;  // No displacement needed if free line available
+    }
+    uint64_t accesses = set_accesses[s];
+    uint64_t hits = set_hits[s];
+    double hit_rate = accesses > 0 ? (100.0 * hits / accesses) : 100.0;
+    return hit_rate < hit_rate_threshold;
+  }
+
+  // ================== Secondary Search Decision Functions ==================
+
+  /**
+   * Saturation-based secondary search decision
+   * Allows secondary search when destination set is not fully saturated
+   * @param src_set Source set index
+   * @param dest_set Destination set index
+   */
+  bool secondary_search_decision_saturation_based(uint32_t src_set, uint32_t dest_set) const {
+    if(dest_set == src_set) {
+      return false;  // Cannot use same set
+    }
+    uint32_t dest_saturation = replacer[0].get_saturation(dest_set);
+    return replacer[0].get_free_line_available(dest_set) || (dest_saturation < NW);
+  }
+
+  /**
+   * Miss-rate-based secondary search decision  
+   * Allows secondary search when destination set has better hit rate or has free lines
+   * @param src_set Source set index
+   * @param dest_set Destination set index
+   */
+  bool secondary_search_decision_miss_rate_based(uint32_t src_set, uint32_t dest_set) const {
+    if(dest_set == src_set) {
+      return false;  // Cannot use same set
+    }
+    if(replacer[0].get_free_line_available(dest_set)) {
+      return true;  // Free line available in destination
+    }
+    uint64_t dest_accesses = set_accesses[dest_set];
+    uint64_t dest_hits = set_hits[dest_set];
+    double dest_hit_rate = dest_accesses > 0 ? (100.0 * dest_hits / dest_accesses) : 100.0;
+    return dest_hit_rate > 0.0;  // Allow if destination has any hits
+  }
   
   virtual ~CacheSBC() override {
     if(displacement_attempts > 0) {
@@ -719,6 +787,16 @@ public:
       sbc_logger->flush();
       delete sbc_logger;
     }
+  }
+
+  double compute_global_avg_hit_rate() const {
+    uint64_t total_accesses = 0;
+    uint64_t total_hits = 0;
+    for(uint32_t s = 0; s < nset; s++) {
+      total_accesses += set_accesses[s];
+      total_hits += set_hits[s];
+    }
+    return total_accesses > 0 ? (100.0 * total_hits / total_accesses) : 0.0;
   }
   
   /**
@@ -741,17 +819,43 @@ public:
         return false;
       }
     }
+
+    //src_hit_rate
+    uint64_t accesses = set_accesses[*s];
+    uint64_t hits = set_hits[*s];
+    uint64_t secondary_hits = set_secondary_hits[*s];
+    uint64_t misses = set_misses[*s];
+
+    uint32_t total_hits = hits; //secondary hits are already included
+    double hit_rate = accesses > 0 ? (100.0 * total_hits / accesses) : 0.0;
+    double secondary_rate = total_hits > 0 ? (100.0 * secondary_hits / total_hits) : 0.0;
+
+    double avg_hit_rate = compute_global_avg_hit_rate();
+
     
-    // Check if displacement is needed
-    if(replacer[0].needs_displacement(*s)) {
+    // Check if displacement is needed using one of the decision functions:
+    // Option 1: Saturation-based (original SBC paper approach)
+    // bool do_displacement = displacement_decision_saturation_based(*s);
+    // Option 2: Miss-rate-based (performance-aware approach)
+    bool do_displacement = displacement_decision_miss_rate_based(*s, 80.0);
+    
+    if(do_displacement) {
       displacement_attempts++;
       
       // Try to displace to another set
       uint32_t dest_set = replacer[0].get_displacement_destination(*s);
-      bool secondary_search = (dest_set != *s);
       uint32_t dest_saturation = replacer[0].get_saturation(dest_set);
+      uint32_t dest_set_hits = set_hits[dest_set];
+      uint32_t dest_set_accesses = set_accesses[dest_set];
+      double dest_hit_rate = dest_set_accesses > 0 ? (100.0 * dest_set_hits / dest_set_accesses) : 0.0;
+
+      // Check if secondary search/displacement to destination is viable:
+      // Option 1: Saturation-based (original SBC paper approach)
+      // bool do_secondary_search = secondary_search_decision_saturation_based(*s, dest_set);
+      // Option 2: Miss-rate-based (performance-aware approach)
+      bool do_secondary_search = secondary_search_decision_miss_rate_based(*s, dest_set);
       
-      if(dest_set != *s && dest_saturation < NW) {
+      if(do_secondary_search) {
         // Displacement is possible
         successful_displacements++;
         
@@ -775,13 +879,6 @@ public:
               victim_home_set = victim_meta->get_home_set();
             }
           }
-          
-          // Log eviction of victim
-          // if(sbc_logger) {
-          //   sbc_logger->log_eviction(victim_addr, *s, *w, src_saturation,
-          //                           victim_was_displaced, victim_home_set,
-          //                           "Victim for displacement");
-          // }
           
           // Allocate in destination set
           replacer[0].replace(dest_set, &dest_way);
@@ -830,12 +927,6 @@ public:
           
           displacement_prevented_misses++;
         }
-        
-        // Log allocation of new line after displacement
-        // if(sbc_logger) {
-        //   sbc_logger->log_allocation(addr, *s, *w, src_saturation, true,
-        //                             "After successful displacement");
-        // }
         
         // Now allocate the new line in the original set
         return true;
@@ -918,8 +1009,17 @@ public:
         
         if(EnMT && check_and_set) this->set_mt_state(*ai, *s, prio);
         if(arrays[*ai]->hit(addr, *s, w)) {
-          result = true;
-          secondary_hit = true;
+          // Only count as secondary hit if line was displaced FROM native_set
+          auto meta = static_cast<MT*>(arrays[*ai]->get_meta(*s, *w));
+          bool is_valid_secondary = false;
+          if constexpr (requires { meta->is_displaced(); }) {
+            is_valid_secondary = meta->is_displaced() && (meta->get_home_set() == native_set);
+          }
+          
+          if(is_valid_secondary) {
+            result = true;
+            secondary_hit = true;
+          }
         }
         if(EnMT && check_and_set) this->reset_mt_state(*ai, *s, prio);
       }
